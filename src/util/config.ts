@@ -8,6 +8,7 @@ export const TOKENS_PATH = path.join(CONFIG_DIR, "tokens.json");
 export const CLIENT_INFO_PATH = path.join(CONFIG_DIR, "client.json");
 export const AUTH_STATE_PATH = path.join(CONFIG_DIR, "auth-state.json");
 export const BEADS_CONFIG_PATH = path.join(CONFIG_DIR, "beads.json");
+export const BEADS_STATE_PATH = path.join(CONFIG_DIR, "beads-state.json");
 
 export const MCP_SERVER_URL = "https://mcp.notion.com/mcp";
 export const CLIENT_NAME = "ncli";

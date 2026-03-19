@@ -61,8 +61,9 @@ See `references/id-patterns.md` for detailed extraction patterns.
 | `ncli search "<query>"` | Search pages/databases |
 | `ncli fetch <url-or-id>` | Get page/database content |
 | `ncli beads status --database-id <db-id>` | Check beads DB wiring and schema readiness |
-| `ncli beads pull` | Pull locally managed Beads pages into issue JSON |
-| `ncli beads push --input <path|->` | Create/update locally managed dedicated beads DB pages |
+| `ncli beads state doctor` | Diagnose saved managed page mappings without mutating Notion |
+| `ncli beads pull` | Pull managed Beads pages into issue JSON with body/comments |
+| `ncli beads push --input <path|-> [--archive-missing]` | Sync managed dedicated beads DB pages including body and create-only comments |
 
 ### Page Operations
 | Command | Description |
@@ -194,12 +195,20 @@ ncli beads init --parent <page-id> --json
 # 2. Verify the database wiring and schema
 ncli beads status --json
 
-# 3. Pull locally managed issues
+# 3. Inspect saved managed page mappings
+ncli beads state show --json
+ncli beads state doctor --json
+
+# 4. Pull locally managed issues with body/comments
 ncli beads pull --json
 
-# 4. Push issue JSON (match by "Beads ID")
-echo '{"issues":[{"id":"bd-1","title":"Fix login","status":"open"}]}' | \
+# 5. Push issue JSON (match by "Beads ID")
+echo '{"issues":[{"id":"bd-1","title":"Fix login","description":"short summary","body":"full body","comments":[{"body":"new comment"}],"status":"open"}]}' | \
   ncli beads push --dry-run --input - --json
+
+# 6. Plan archive candidates for managed pages missing from input
+echo '{"issues":[]}' | \
+  ncli beads push --archive-missing --dry-run --input - --json
 ```
 
 ### 5. Organize Content

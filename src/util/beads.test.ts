@@ -6,10 +6,14 @@ import {
 	buildBeadsProperties,
 	detectBeadsPropertiesFromQueryPayload,
 	extractBeadsDatabaseInfoFromText,
+	extractBeadsPageBodyFromText,
 	extractPageIdFromUrl,
 	extractViewUrlFromText,
 	findDuplicateBeadsIds,
+	issuesEqualForPropertySync,
 	issuesEqualForSync,
+	normalizeBeadsCommentListPayload,
+	normalizeBeadsPageFetchPayload,
 	normalizeBeadsPushInput,
 	normalizeBeadsQueryPayload,
 } from "./beads.js";
@@ -48,6 +52,18 @@ describe("extractViewUrlFromText", () => {
 		expect(extractViewUrlFromText(`Created view "All" (table) — view://abcd-1234`)).toBe(
 			"view://abcd-1234",
 		);
+	});
+});
+
+describe("extractBeadsPageBodyFromText", () => {
+	it("extracts normalized page content from fetch text", () => {
+		expect(
+			extractBeadsPageBodyFromText(`<page><content>
+Line 1
+
+Line 2
+</content></page>`),
+		).toBe("Line 1\n\nLine 2");
 	});
 });
 
@@ -124,12 +140,14 @@ describe("normalizeBeadsQueryPayload", () => {
 					id: "bd-42",
 					title: "Fix login",
 					description: "Handle the edge case",
+					body: null,
 					status: "in_progress",
 					priority: "high",
 					type: "bug",
 					issue_type: "bug",
 					assignee: "osamu",
 					labels: ["backend", "auth"],
+					comments: [],
 					external_ref: "https://www.notion.so/Task-123456781234123412341234567890ab",
 					notion_page_id: "page-1",
 					url: "https://www.notion.so/Task-123456781234123412341234567890ab",
@@ -153,32 +171,84 @@ describe("normalizeBeadsPushInput", () => {
 					id: "bd-1",
 					title: "Issue",
 					description: null,
+					body: null,
 					status: "open",
 					priority: null,
 					type: null,
 					issue_type: null,
 					assignee: null,
 					labels: ["a", "b"],
+					comments: [],
 				},
 			],
 		});
 	});
 });
 
+describe("normalizeBeadsPageFetchPayload", () => {
+	it("extracts body content from page fetch payload", () => {
+		expect(
+			normalizeBeadsPageFetchPayload({
+				text: `<page url="https://www.notion.so/123456781234123412341234567890ab">
+<properties>
+{"Beads ID":"bd-1","Name":"Issue","Description":"desc","url":"https://www.notion.so/123456781234123412341234567890ab"}
+</properties>
+<content>
+Hello
+
+world
+</content>
+</page>`,
+			}),
+		).toMatchObject({
+			id: "bd-1",
+			title: "Issue",
+			description: "desc",
+			body: "Hello\n\nworld",
+			comments: [],
+		});
+	});
+});
+
+describe("normalizeBeadsCommentListPayload", () => {
+	it("extracts discussion-aware comments", () => {
+		expect(
+			normalizeBeadsCommentListPayload({
+				text: `<discussions total-count="1" shown-count="1">
+<discussion id="discussion://page/one" comment-count="1" resolved="false" type="comment" context="page">
+<comment id="comment-1" url="https://www.notion.so/comment-1" user-url="user://me" datetime="2026-03-19T14:15:21.852Z">probe comment</comment>
+</discussion>
+</discussions>`,
+			}),
+		).toEqual([
+			{
+				comment_id: "comment-1",
+				discussion_id: "discussion://page/one",
+				body: "probe comment",
+				author: "user://me",
+				created_at: "2026-03-19T14:15:21.852Z",
+				url: "https://www.notion.so/comment-1",
+			},
+		]);
+	});
+});
+
 describe("issuesEqualForSync", () => {
 	it("treats matching issues as equal even if labels order differs", () => {
 		expect(
-			issuesEqualForSync(
+			issuesEqualForPropertySync(
 				{
 					id: "bd-1",
 					title: "Issue",
 					description: "desc",
+					body: "body",
 					status: "open",
 					priority: "high",
 					type: "task",
 					issue_type: "task",
 					assignee: "osamu",
 					labels: ["b", "a"],
+					comments: [],
 					external_ref: "notion:page-1",
 					notion_page_id: "page-1",
 					url: "https://www.notion.so/page-1",
@@ -189,12 +259,50 @@ describe("issuesEqualForSync", () => {
 					id: "bd-1",
 					title: "Issue",
 					description: "desc",
+					body: "changed",
 					status: "open",
 					priority: "high",
 					type: "task",
 					issue_type: "task",
 					assignee: "osamu",
 					labels: ["a", "b"],
+					comments: [],
+				},
+			),
+		).toBe(true);
+
+		expect(
+			issuesEqualForSync(
+				{
+					id: "bd-1",
+					title: "Issue",
+					description: "desc",
+					body: "body",
+					status: "open",
+					priority: "high",
+					type: "task",
+					issue_type: "task",
+					assignee: "osamu",
+					labels: ["b", "a"],
+					comments: [],
+					external_ref: "notion:page-1",
+					notion_page_id: "page-1",
+					url: "https://www.notion.so/page-1",
+					created_at: null,
+					updated_at: null,
+				},
+				{
+					id: "bd-1",
+					title: "Issue",
+					description: "desc",
+					body: "body",
+					status: "open",
+					priority: "high",
+					type: "task",
+					issue_type: "task",
+					assignee: "osamu",
+					labels: ["a", "b"],
+					comments: [],
 				},
 			),
 		).toBe(true);
@@ -208,12 +316,14 @@ describe("buildBeadsProperties", () => {
 				id: "bd-7",
 				title: "Ship it",
 				description: "Release checklist",
+				body: "body",
 				status: "closed",
 				priority: "critical",
 				type: "feature",
 				issue_type: "feature",
 				assignee: "osamu",
 				labels: ["release"],
+				comments: [],
 			}),
 		).toEqual({
 			title: "Ship it",
@@ -233,12 +343,14 @@ describe("buildBeadsProperties", () => {
 				id: "bd-7",
 				title: "Ship it",
 				description: null,
+				body: null,
 				status: "invalid",
 				priority: null,
 				type: null,
 				issue_type: null,
 				assignee: null,
 				labels: [],
+				comments: [],
 			}),
 		).toThrow("Invalid beads status");
 	});

@@ -2,13 +2,17 @@ import { Command } from "commander";
 import { describe, expect, it } from "vitest";
 import {
 	buildBeadsAuthCall,
+	buildBeadsBodyUpdateCall,
 	buildBeadsCreateCall,
 	buildBeadsFetchCall,
 	buildBeadsInitDbCall,
 	buildBeadsInitViewCall,
 	buildBeadsPullCall,
+	buildBeadsStateDoctorEntry,
 	buildBeadsUpdateCall,
+	detectBeadsArchiveSupport,
 	registerBeadsCommands,
+	summarizeBeadsStateDoctorEntries,
 } from "./beads.js";
 
 describe("buildBeadsAuthCall", () => {
@@ -70,12 +74,14 @@ describe("buildBeadsCreateCall", () => {
 					id: "bd-1",
 					title: "Issue",
 					description: null,
+					body: "Body text",
 					status: "open",
 					priority: null,
 					type: null,
 					issue_type: null,
 					assignee: null,
 					labels: [],
+					comments: [],
 				},
 			]),
 		).toEqual({
@@ -89,6 +95,7 @@ describe("buildBeadsCreateCall", () => {
 							"Beads ID": "bd-1",
 							Status: "Open",
 						},
+						content: "Body text",
 					},
 				],
 			},
@@ -103,12 +110,14 @@ describe("buildBeadsUpdateCall", () => {
 				id: "bd-1",
 				title: "Issue",
 				description: null,
+				body: null,
 				status: null,
 				priority: "high",
 				type: "bug",
 				issue_type: "bug",
 				assignee: null,
 				labels: [],
+				comments: [],
 			}),
 		).toEqual({
 			tool: "notion-update-page",
@@ -126,8 +135,154 @@ describe("buildBeadsUpdateCall", () => {
 	});
 });
 
+describe("buildBeadsBodyUpdateCall", () => {
+	it("replaces page content separately from property updates", () => {
+		expect(buildBeadsBodyUpdateCall("page-1", "Body")).toEqual({
+			tool: "notion-update-page",
+			args: {
+				page_id: "page-1",
+				command: "replace_content",
+				new_str: "Body",
+			},
+		});
+	});
+});
+
+describe("buildBeadsStateDoctorEntry", () => {
+	it("marks matching entries as ok", () => {
+		expect(
+			buildBeadsStateDoctorEntry("bd-1", "page-1", {
+				id: "bd-1",
+				title: "Issue",
+				description: null,
+				body: null,
+				status: "open",
+				priority: null,
+				type: null,
+				issue_type: null,
+				assignee: null,
+				labels: [],
+				comments: [],
+				external_ref: "notion:page-1",
+				notion_page_id: "page-1",
+				url: "https://www.notion.so/page-1",
+				created_at: null,
+				updated_at: null,
+			}),
+		).toMatchObject({
+			status: "ok",
+			message: null,
+		});
+	});
+
+	it("marks mismatched ids as drift", () => {
+		expect(
+			buildBeadsStateDoctorEntry("bd-1", "page-1", {
+				id: "bd-2",
+				title: "Issue",
+				description: null,
+				body: null,
+				status: "open",
+				priority: null,
+				type: null,
+				issue_type: null,
+				assignee: null,
+				labels: [],
+				comments: [],
+				external_ref: "notion:page-1",
+				notion_page_id: "page-1",
+				url: "https://www.notion.so/page-1",
+				created_at: null,
+				updated_at: null,
+			}),
+		).toMatchObject({
+			status: "id_drift",
+			actual_beads_id: "bd-2",
+		});
+	});
+});
+
+describe("summarizeBeadsStateDoctorEntries", () => {
+	it("counts each doctor status", () => {
+		expect(
+			summarizeBeadsStateDoctorEntries([
+				{ beads_id: "bd-1", page_id: "page-1", status: "ok", message: null },
+				{ beads_id: "bd-2", page_id: "page-2", status: "missing_page", message: "missing" },
+				{ beads_id: "bd-3", page_id: "page-3", status: "id_drift", message: "drift" },
+				{ beads_id: "bd-4", page_id: "page-4", status: "property_mismatch", message: "bad" },
+			]),
+		).toEqual({
+			ok: false,
+			total_count: 4,
+			ok_count: 1,
+			missing_page_count: 1,
+			id_drift_count: 1,
+			property_mismatch_count: 1,
+		});
+	});
+});
+
+describe("detectBeadsArchiveSupport", () => {
+	it("reports unsupported when notion-update-page has no archive command", () => {
+		expect(
+			detectBeadsArchiveSupport([
+				{
+					name: "notion-update-page",
+					inputSchema: {
+						type: "object",
+						properties: {
+							command: {
+								enum: [
+									"update_properties",
+									"update_content",
+									"replace_content",
+									"apply_template",
+									"update_verification",
+								],
+							},
+						},
+					},
+				} as never,
+			]),
+		).toMatchObject({
+			supported: false,
+			mode: "unsupported",
+			supported_commands: [
+				"update_properties",
+				"update_content",
+				"replace_content",
+				"apply_template",
+				"update_verification",
+			],
+		});
+	});
+
+	it("reports support when notion-update-page exposes archive", () => {
+		expect(
+			detectBeadsArchiveSupport([
+				{
+					name: "notion-update-page",
+					inputSchema: {
+						type: "object",
+						properties: {
+							command: {
+								enum: ["update_properties", "archive"],
+							},
+						},
+					},
+				} as never,
+			]),
+		).toEqual({
+			supported: true,
+			mode: "update_page_command",
+			reason: null,
+			supported_commands: ["update_properties", "archive"],
+		});
+	});
+});
+
 describe("registerBeadsCommands", () => {
-	it("registers init, config, status, pull, and push subcommands", () => {
+	it("registers init, config, state, status, pull, and push subcommands", () => {
 		const program = new Command();
 		registerBeadsCommands(program);
 		const beads = program.commands.find((command) => command.name() === "beads");
@@ -135,6 +290,7 @@ describe("registerBeadsCommands", () => {
 		expect(beads?.commands.map((command) => command.name())).toEqual([
 			"init",
 			"config",
+			"state",
 			"status",
 			"pull",
 			"push",
@@ -142,5 +298,13 @@ describe("registerBeadsCommands", () => {
 
 		const config = beads?.commands.find((command) => command.name() === "config");
 		expect(config?.commands.map((command) => command.name())).toEqual(["set", "show", "clear"]);
+
+		const state = beads?.commands.find((command) => command.name() === "state");
+		expect(state?.commands.map((command) => command.name())).toEqual([
+			"show",
+			"export",
+			"import",
+			"doctor",
+		]);
 	});
 });

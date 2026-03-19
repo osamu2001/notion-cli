@@ -9,6 +9,7 @@ ncli login / logout / whoami
 ncli search <query>
 ncli fetch <url-or-id>
 ncli beads status / pull / push
+ncli beads state show / export / import / doctor
 
 ncli page create / update <id> / move <id> / duplicate <id>
 ncli db create / update <id> / query <view-url>
@@ -31,8 +32,12 @@ ncli api <tool-name> [json]     # raw escape hatch
 | `search <query>` | `notion-search` | **`query`**, `query_type`, `content_search_mode`, `page_size`, `filters` |
 | `fetch <url-or-id>` | `notion-fetch` | **`id`**, `include_transcript`, `include_discussions` |
 | `beads status [--database-id <id>] [--view-url <url>]` | `notion-get-users` + `notion-fetch` | self auth check, database fetch, schema validation from database fetch text, saved manifest summary |
-| `beads pull` | `notion-fetch` | saved config + local manifest of managed page IDs |
-| `beads push [--database-id <id> --view-url <url>] --input <path|->` | `notion-fetch` + `notion-create-pages` + `notion-update-page` | dedicated beads DB sync using saved manifest entries matched by `Beads ID` |
+| `beads state show` | local state file | print saved `beads-state.json` |
+| `beads state export --output <path|->` | local state file | export saved `beads-state.json` |
+| `beads state import --input <path|->` | local state file + saved config | import validated `beads-state.json` |
+| `beads state doctor` | `notion-fetch` | validate saved managed page mappings without mutating Notion |
+| `beads pull` | `notion-fetch` + `notion-get-comments` | saved config + local manifest of managed page IDs, with page body and comments |
+| `beads push [--database-id <id> --view-url <url>] --input <path|-> [--archive-missing]` | `notion-fetch` + `notion-create-pages` + `notion-update-page` + `notion-create-comment` + `notion-get-comments` | dedicated beads DB sync using saved manifest entries matched by `Beads ID`; body sync and create-only comment sync are included |
 | `page create` | `notion-create-pages` | **`pages`** (配列: `{ properties, content, icon, cover }`), `parent` (`{ page_id \| database_id \| data_source_id, type }`) |
 | `page update <id>` | `notion-update-page` | **`page_id`**, **`command`** (`update_properties` / `update_content` / `replace_content` / `apply_template` / `update_verification`), `properties`, `new_str`, `content_updates`, `icon`, `cover` |
 | `page move <id>...` | `notion-move-pages` | **`page_or_database_ids`** (配列), **`new_parent`** (`{ page_id \| database_id \| data_source_id \| workspace, type }`) |
@@ -385,6 +390,10 @@ ncli beads init --parent <page-id> --json
 # 接続と schema の確認
 ncli beads status --json
 
+# 保存済み managed page state の確認・診断
+ncli beads state show --json
+ncli beads state doctor --json
+
 # ローカル管理中の Notion ページを pull
 ncli beads pull --json
 
@@ -393,9 +402,18 @@ cat issues.json | ncli beads push \
   --dry-run \
   --input - \
   --json
+
+# input に存在しない managed page の archive 候補を確認
+cat issues.json | ncli beads push \
+  --archive-missing \
+  --dry-run \
+  --input - \
+  --json
 ```
 
-`push` は `Beads ID` をキーに create/update を判定します。v1 では delete/archive や page body 同期は行いません。
+`description` は `Description` property に残す短文サマリ、`body` は page body、`comments` は create-only の comment 配列として扱います。push は pulled comment の `comment_id` を既存扱いにし、`comment_id` を持たない comment だけを create 候補にします。
+
+`push` は `Beads ID` をキーに create/update を判定し、existing page では property update の後に body replace、その後に comment create を行います。 `--archive-missing` は `archived[]` を返せますが、current live Notion MCP では archive 実行は未対応なので、live run では archive 候補がある時点で fail-fast します。
 
 ### エラー出力例
 

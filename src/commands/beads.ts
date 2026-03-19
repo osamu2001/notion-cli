@@ -1,8 +1,10 @@
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
+import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { Command } from "commander";
 import { withConnection } from "../mcp/with-connection.js";
 import { printOutput } from "../output/json.js";
-import type { BeadsIssue, BeadsPushIssue } from "../util/beads.js";
+import type { BeadsIssue, BeadsIssueComment, BeadsPushIssue } from "../util/beads.js";
 import {
 	assessBeadsSchema,
 	BEADS_DEFAULT_DATABASE_TITLE,
@@ -17,14 +19,22 @@ import {
 	extractSelfUserFromPayload,
 	extractViewUrlFromText,
 	findDuplicateBeadsIds,
+	issuesEqualForPropertySync,
 	issuesEqualForSync,
+	normalizeBeadsCommentListPayload,
 	normalizeBeadsPageFetchPayload,
 	parseBeadsPushInput,
 } from "../util/beads.js";
 import { BeadsConfigStore, type StoredBeadsConfig } from "../util/beads-config.js";
-import { BeadsStateStore } from "../util/beads-state.js";
+import {
+	BeadsStateStore,
+	listStoredBeadsStateEntries,
+	normalizeStoredBeadsState,
+	type StoredBeadsState,
+} from "../util/beads-state.js";
 import { CliError } from "../util/errors.js";
 import { readStdin } from "../util/stdin.js";
+import { buildCommentCreateCall, buildCommentListCall } from "./comment.js";
 
 interface BeadsStatusOptions {
 	databaseId?: string;
@@ -41,6 +51,7 @@ interface BeadsPushOptions {
 	input?: string;
 	data?: string;
 	dryRun?: boolean;
+	archiveMissing?: boolean;
 }
 
 interface BeadsInitOptions {
@@ -51,6 +62,35 @@ interface BeadsInitOptions {
 interface BeadsConfigSetOptions {
 	databaseId?: string;
 	viewUrl?: string;
+}
+
+interface BeadsStateExportOptions {
+	output?: string;
+}
+
+interface BeadsStateImportOptions {
+	input?: string;
+}
+
+type BeadsStateDoctorStatus = "ok" | "missing_page" | "id_drift" | "property_mismatch";
+
+export interface BeadsStateDoctorEntry {
+	beads_id: string;
+	page_id: string;
+	status: BeadsStateDoctorStatus;
+	message: string | null;
+	actual_beads_id?: string | null;
+	notion_page_id?: string | null;
+	title?: string | null;
+}
+
+type ArchiveSupportMode = "update_page_command" | "unsupported";
+
+export interface BeadsArchiveSupport {
+	supported: boolean;
+	mode: ArchiveSupportMode;
+	reason: string | null;
+	supported_commands: string[];
 }
 
 interface ToolCall {
@@ -83,6 +123,10 @@ function requireOption(
 
 function configHint(command: string): string {
 	return `Run "ncli beads init --parent <page-id>" or "ncli beads config set --database-id <id> --view-url <url>" before "ncli beads ${command}"`;
+}
+
+function stateHint(command: string): string {
+	return `Run "ncli beads push ...", "ncli beads config set --database-id <id> --view-url <url>", or "ncli beads state import --input <path|->" before "ncli beads state ${command}"`;
 }
 
 function resolveStatusTarget(opts: BeadsStatusOptions): ResolvedBeadsTarget {
@@ -224,7 +268,10 @@ export function buildBeadsCreateCall(dataSourceId: string, issues: BeadsPushIssu
 		tool: "notion-create-pages",
 		args: {
 			parent: { data_source_id: dataSourceId, type: "data_source_id" },
-			pages: issues.map((issue) => ({ properties: buildBeadsProperties(issue) })),
+			pages: issues.map((issue) => ({
+				properties: buildBeadsProperties(issue),
+				...(issue.body ? { content: issue.body } : {}),
+			})),
 		},
 	};
 }
@@ -238,6 +285,42 @@ export function buildBeadsUpdateCall(pageId: string, issue: BeadsPushIssue): Too
 			properties: buildBeadsProperties(issue),
 		},
 	};
+}
+
+export function buildBeadsBodyUpdateCall(pageId: string, body: string | null): ToolCall {
+	return {
+		tool: "notion-update-page",
+		args: {
+			page_id: pageId,
+			command: "replace_content",
+			new_str: body ?? "",
+		},
+	};
+}
+
+function commentFingerprint(comment: Pick<BeadsIssueComment, "discussion_id" | "body">): string {
+	return `${comment.discussion_id ?? ""}\n${comment.body}`;
+}
+
+function planBeadsCommentCreates(
+	existingComments: BeadsIssueComment[],
+	nextComments: BeadsIssueComment[],
+): BeadsIssueComment[] {
+	const existingFingerprints = new Set(
+		existingComments.map((comment) => commentFingerprint(comment)),
+	);
+	const plannedFingerprints = new Set<string>();
+	return nextComments.filter((comment) => {
+		if (comment.comment_id) {
+			return false;
+		}
+		const fingerprint = commentFingerprint(comment);
+		if (existingFingerprints.has(fingerprint) || plannedFingerprints.has(fingerprint)) {
+			return false;
+		}
+		plannedFingerprints.add(fingerprint);
+		return true;
+	});
 }
 
 function buildStoredConfig(
@@ -264,6 +347,305 @@ function validateStoredConfigMatch(
 			'Run "ncli beads config set --database-id <id> --view-url <url>" to refresh the saved config',
 		);
 	}
+}
+
+function readRequiredStoredState(command: string): {
+	store: BeadsStateStore;
+	state: StoredBeadsState;
+} {
+	const store = new BeadsStateStore();
+	const state = store.read();
+	if (!state) {
+		throw new CliError(
+			"Missing beads state",
+			`beads state ${command} needs a saved beads state file`,
+			stateHint(command),
+		);
+	}
+	return { store, state };
+}
+
+function parseStateJson(text: string, source: string): unknown {
+	try {
+		return JSON.parse(text) as unknown;
+	} catch {
+		throw new CliError(
+			"Invalid beads state JSON",
+			`${source} could not be parsed as JSON`,
+			'Check syntax or export a fresh state with "ncli beads state export --output -"',
+		);
+	}
+}
+
+function summarizeBeadsStateDoctorCount(
+	entries: BeadsStateDoctorEntry[],
+	status: BeadsStateDoctorStatus,
+): number {
+	return entries.filter((entry) => entry.status === status).length;
+}
+
+export function summarizeBeadsStateDoctorEntries(entries: BeadsStateDoctorEntry[]) {
+	const totalCount = entries.length;
+	const okCount = summarizeBeadsStateDoctorCount(entries, "ok");
+	return {
+		ok: totalCount === okCount,
+		total_count: totalCount,
+		ok_count: okCount,
+		missing_page_count: summarizeBeadsStateDoctorCount(entries, "missing_page"),
+		id_drift_count: summarizeBeadsStateDoctorCount(entries, "id_drift"),
+		property_mismatch_count: summarizeBeadsStateDoctorCount(entries, "property_mismatch"),
+	};
+}
+
+export function buildBeadsStateDoctorEntry(
+	expectedBeadsId: string,
+	pageId: string,
+	issue: BeadsIssue,
+): BeadsStateDoctorEntry {
+	if (issue.id !== expectedBeadsId) {
+		return {
+			beads_id: expectedBeadsId,
+			page_id: pageId,
+			status: "id_drift",
+			message: `Expected Beads ID ${expectedBeadsId}, but Notion page reports ${issue.id}`,
+			actual_beads_id: issue.id,
+			notion_page_id: issue.notion_page_id,
+			title: issue.title,
+		};
+	}
+	if (issue.notion_page_id && issue.notion_page_id !== pageId) {
+		return {
+			beads_id: expectedBeadsId,
+			page_id: pageId,
+			status: "property_mismatch",
+			message: `Fetched page ${pageId} normalized to page id ${issue.notion_page_id}`,
+			actual_beads_id: issue.id,
+			notion_page_id: issue.notion_page_id,
+			title: issue.title,
+		};
+	}
+	return {
+		beads_id: expectedBeadsId,
+		page_id: pageId,
+		status: "ok",
+		message: null,
+		actual_beads_id: issue.id,
+		notion_page_id: issue.notion_page_id,
+		title: issue.title,
+	};
+}
+
+function doctorErrorMessage(error: unknown): string {
+	if (error instanceof Error && error.message) {
+		return error.message;
+	}
+	return String(error);
+}
+
+function extractToolCommandEnumOptions(tool: Tool | undefined): string[] {
+	if (!tool || typeof tool.inputSchema !== "object" || tool.inputSchema === null) {
+		return [];
+	}
+	const schema = tool.inputSchema as Record<string, unknown>;
+	const properties =
+		typeof schema.properties === "object" && schema.properties !== null
+			? (schema.properties as Record<string, unknown>)
+			: null;
+	const command =
+		properties &&
+		typeof properties.command === "object" &&
+		properties.command !== null &&
+		!Array.isArray(properties.command)
+			? (properties.command as Record<string, unknown>)
+			: null;
+	const values = Array.isArray(command?.enum) ? command.enum : [];
+	return values.filter((value): value is string => typeof value === "string");
+}
+
+export function detectBeadsArchiveSupport(tools: Tool[]): BeadsArchiveSupport {
+	const updatePageTool = tools.find((tool) => tool.name === "notion-update-page");
+	const supportedCommands = extractToolCommandEnumOptions(updatePageTool);
+	if (supportedCommands.includes("archive")) {
+		return {
+			supported: true,
+			mode: "update_page_command",
+			reason: null,
+			supported_commands: supportedCommands,
+		};
+	}
+	const reason =
+		supportedCommands.length > 0
+			? `The current live Notion MCP only exposes notion-update-page commands: ${supportedCommands.join(", ")}`
+			: "The current live Notion MCP does not expose archive support on notion-update-page";
+	return {
+		supported: false,
+		mode: "unsupported",
+		reason,
+		supported_commands: supportedCommands,
+	};
+}
+
+function buildBeadsArchiveCall(pageId: string, archiveSupport: BeadsArchiveSupport): ToolCall {
+	if (archiveSupport.supported && archiveSupport.mode === "update_page_command") {
+		return {
+			tool: "notion-update-page",
+			args: {
+				page_id: pageId,
+				command: "archive",
+			},
+		};
+	}
+	throw new CliError(
+		"Archive is unavailable on the current live Notion MCP",
+		archiveSupport.reason ?? "The connected Notion MCP does not support archiving pages",
+		'Use "ncli beads push --archive-missing --dry-run" to inspect candidates, then archive or remove them manually in Notion for now',
+	);
+}
+
+async function collectBeadsStateDoctorData(
+	conn: { callTool(name: string, args: Record<string, unknown>): Promise<unknown> },
+	state: StoredBeadsState,
+): Promise<{
+	entries: BeadsStateDoctorEntry[];
+	rawEntries: Array<Record<string, unknown>>;
+	issues: BeadsIssue[];
+}> {
+	const entries: BeadsStateDoctorEntry[] = [];
+	const rawEntries: Array<Record<string, unknown>> = [];
+	const issues: BeadsIssue[] = [];
+
+	for (const entry of listStoredBeadsStateEntries(state)) {
+		try {
+			const fetchCall = { tool: "notion-fetch", args: { id: entry.page_id } };
+			const result = (await conn.callTool(fetchCall.tool, fetchCall.args)) as Record<
+				string,
+				unknown
+			>;
+			try {
+				const payload = extractResultJson(result, `beads state doctor page ${entry.id}`);
+				const issue = normalizeBeadsPageFetchPayload(payload);
+				const doctorEntry = buildBeadsStateDoctorEntry(entry.id, entry.page_id, issue);
+				entries.push(doctorEntry);
+				rawEntries.push({ ...doctorEntry, fetch: result });
+				if (doctorEntry.status === "ok") {
+					issues.push(issue);
+				}
+			} catch (error) {
+				const message = doctorErrorMessage(error);
+				const doctorEntry: BeadsStateDoctorEntry = {
+					beads_id: entry.id,
+					page_id: entry.page_id,
+					status: "property_mismatch",
+					message,
+				};
+				entries.push(doctorEntry);
+				rawEntries.push({ ...doctorEntry, fetch: result });
+			}
+		} catch (error) {
+			const message = doctorErrorMessage(error);
+			const doctorEntry: BeadsStateDoctorEntry = {
+				beads_id: entry.id,
+				page_id: entry.page_id,
+				status: "missing_page",
+				message,
+			};
+			entries.push(doctorEntry);
+			rawEntries.push({ ...doctorEntry, error: message });
+		}
+	}
+
+	return { entries, rawEntries, issues };
+}
+
+function runBeadsStateShow(cmd: Command): void {
+	const store = new BeadsStateStore();
+	const state = store.read();
+	printOutput(
+		{
+			configured: !!state,
+			path: store.filePath(),
+			state,
+		},
+		cmd.optsWithGlobals(),
+	);
+}
+
+async function runBeadsStateExport(opts: BeadsStateExportOptions, cmd: Command): Promise<void> {
+	const { state } = readRequiredStoredState("export");
+	const output = requireOption(opts.output, "--output", "An export path or -", "state export");
+	if (output === "-") {
+		printOutput(state as unknown as Record<string, unknown>, cmd.optsWithGlobals());
+		return;
+	}
+	await mkdir(dirname(output), { recursive: true });
+	await writeFile(output, JSON.stringify(state, null, 2), { mode: 0o600 });
+	printOutput(
+		{
+			exported: true,
+			path: output,
+			state,
+		},
+		cmd.optsWithGlobals(),
+	);
+}
+
+async function runBeadsStateImport(opts: BeadsStateImportOptions, cmd: Command): Promise<void> {
+	const input = requireOption(opts.input, "--input", "An import path or -", "state import");
+	const raw = input === "-" ? await readStdin() : await readFile(input, "utf8");
+	const state = normalizeStoredBeadsState(
+		parseStateJson(raw, "beads state import"),
+		"beads state import",
+	);
+	const config = new BeadsConfigStore().read();
+	if (config && config.database_id !== state.database_id) {
+		throw new CliError(
+			"Invalid beads state import",
+			`Imported database_id ${state.database_id} does not match saved config database_id ${config.database_id}`,
+			"Use a matching export, or update the saved config before importing state",
+		);
+	}
+	const store = new BeadsStateStore();
+	store.save(state);
+	printOutput(
+		{
+			imported: true,
+			path: store.filePath(),
+			state,
+		},
+		cmd.optsWithGlobals(),
+	);
+}
+
+async function runBeadsStateDoctor(cmd: Command): Promise<void> {
+	const { store, state } = readRequiredStoredState("doctor");
+	const config = new BeadsConfigStore().read();
+
+	await withConnection(async (conn) => {
+		const { entries, rawEntries } = await collectBeadsStateDoctorData(conn, state);
+
+		const payload = {
+			database_id: state.database_id,
+			path: store.filePath(),
+			config: {
+				configured: !!config,
+				database_id: config?.database_id ?? null,
+				matches_state_database: config ? config.database_id === state.database_id : null,
+			},
+			summary: summarizeBeadsStateDoctorEntries(entries),
+			entries,
+		};
+
+		const rawPayload = {
+			state,
+			config,
+			entries: rawEntries,
+		};
+
+		printOutput(
+			(cmd.optsWithGlobals().raw ? rawPayload : payload) as Record<string, unknown>,
+			cmd.optsWithGlobals(),
+		);
+	});
 }
 
 async function runBeadsInit(opts: BeadsInitOptions, cmd: Command): Promise<void> {
@@ -423,6 +805,8 @@ async function runBeadsStatus(opts: BeadsStatusOptions, cmd: Command): Promise<v
 	const stateStore = new BeadsStateStore();
 
 	await withConnection(async (conn) => {
+		const tools = await conn.listTools();
+		const archiveSupport = detectBeadsArchiveSupport(tools);
 		const authCall = buildBeadsAuthCall();
 		const authResult = (await conn.callTool(authCall.tool, authCall.args)) as Record<
 			string,
@@ -443,6 +827,10 @@ async function runBeadsStatus(opts: BeadsStatusOptions, cmd: Command): Promise<v
 		const viewUrl = target.viewUrl ?? null;
 		const viewConfigured = !viewUrl || databaseInfo.views.some((view) => view.url === viewUrl);
 		const state = stateStore.readForDatabase(target.databaseId);
+		const { entries: doctorEntries, rawEntries: rawDoctorEntries } = state
+			? await collectBeadsStateDoctorData(conn, state)
+			: { entries: [], rawEntries: [] };
+		const doctorSummary = summarizeBeadsStateDoctorEntries(doctorEntries);
 
 		const payload = {
 			ready: !!databaseInfo.data_source_id && schema.missing.length === 0 && viewConfigured,
@@ -461,15 +849,21 @@ async function runBeadsStatus(opts: BeadsStatusOptions, cmd: Command): Promise<v
 			configured: !!target.config,
 			config_source: target.source,
 			schema,
+			archive: archiveSupport,
 			state: {
+				path: stateStore.filePath(),
+				present: !!state,
 				managed_count: Object.keys(state?.page_ids ?? {}).length,
 				view_configured: viewConfigured,
+				doctor_summary: doctorSummary,
 			},
 		};
 
 		const rawPayload = {
 			auth: authResult,
 			fetch: fetchResult,
+			archive_support: archiveSupport,
+			state_doctor: rawDoctorEntries,
 		};
 
 		printOutput(
@@ -484,30 +878,57 @@ async function runBeadsPull(opts: BeadsPullOptions, cmd: Command): Promise<void>
 	const stateStore = new BeadsStateStore();
 
 	await withConnection(async (conn) => {
-		const state = stateStore.readForDatabase(target.databaseId) ?? {
+		const tools = await conn.listTools();
+		const archiveSupport = detectBeadsArchiveSupport(tools);
+		const savedState = stateStore.readForDatabase(target.databaseId);
+		const state = savedState ?? {
 			database_id: target.databaseId,
 			page_ids: {},
 		};
-		const issues: BeadsPushIssue[] = [];
-		const rawPages: Array<{ beads_id: string; fetch: Record<string, unknown> }> = [];
-
-		for (const [beadsId, pageId] of Object.entries(state.page_ids)) {
-			const fetchCall = { tool: "notion-fetch", args: { id: pageId } };
-			const result = (await conn.callTool(fetchCall.tool, fetchCall.args)) as Record<
+		const {
+			entries: doctorEntries,
+			rawEntries,
+			issues,
+		} = await collectBeadsStateDoctorData(conn, state);
+		const rawComments: Array<{
+			beads_id: string;
+			page_id: string;
+			comments: Record<string, unknown>;
+		}> = [];
+		for (const issue of issues) {
+			if (!issue.notion_page_id) {
+				continue;
+			}
+			const commentCall = buildCommentListCall(issue.notion_page_id, {});
+			const commentResult = (await conn.callTool(commentCall.tool, commentCall.args)) as Record<
 				string,
 				unknown
 			>;
-			const payload = extractResultJson(result, `beads pull page ${beadsId}`);
-			issues.push(normalizeBeadsPageFetchPayload(payload));
-			rawPages.push({ beads_id: beadsId, fetch: result });
+			const commentPayload = extractResultJson(commentResult, `beads pull comments ${issue.id}`);
+			issue.comments = normalizeBeadsCommentListPayload(commentPayload);
+			rawComments.push({
+				beads_id: issue.id,
+				page_id: issue.notion_page_id,
+				comments: commentResult,
+			});
 		}
-
 		issues.sort((a, b) => a.id.localeCompare(b.id));
 
-		const payload = { issues };
+		const payload = {
+			issues,
+			archive: archiveSupport,
+			state: {
+				path: stateStore.filePath(),
+				present: !!savedState,
+				managed_count: Object.keys(state.page_ids).length,
+				doctor_summary: summarizeBeadsStateDoctorEntries(doctorEntries),
+			},
+		};
 		const rawPayload = {
 			state,
-			pages: rawPages,
+			archive_support: archiveSupport,
+			pages: rawEntries,
+			comments: rawComments,
 		};
 
 		printOutput(
@@ -523,6 +944,8 @@ async function runBeadsPush(opts: BeadsPushOptions, cmd: Command): Promise<void>
 	const stateStore = new BeadsStateStore();
 
 	await withConnection(async (conn) => {
+		const tools = await conn.listTools();
+		const archiveSupport = detectBeadsArchiveSupport(tools);
 		const fetchCall = buildBeadsFetchCall(target.databaseId);
 		const fetchResult = (await conn.callTool(fetchCall.tool, fetchCall.args)) as Record<
 			string,
@@ -569,10 +992,16 @@ async function runBeadsPush(opts: BeadsPushOptions, cmd: Command): Promise<void>
 			page_ids: {},
 		};
 		const existingById = new Map<string, BeadsIssue>();
+		const existingCommentsById = new Map<string, BeadsIssueComment[]>();
 		const rawExistingPages: Array<{
 			beads_id: string;
 			page_id: string;
 			fetch: Record<string, unknown>;
+		}> = [];
+		const rawExistingComments: Array<{
+			beads_id: string;
+			page_id: string;
+			comments: Record<string, unknown>;
 		}> = [];
 
 		for (const [expectedBeadsId, pageId] of Object.entries(state.page_ids)) {
@@ -603,9 +1032,50 @@ async function runBeadsPush(opts: BeadsPushOptions, cmd: Command): Promise<void>
 			existingById.set(existingIssue.id, existingIssue);
 			rawExistingPages.push({ beads_id: expectedBeadsId, page_id: pageId, fetch: pageFetchResult });
 		}
+		for (const issue of input.issues) {
+			const current = existingById.get(issue.id);
+			if (!current?.notion_page_id || issue.comments.length === 0) {
+				continue;
+			}
+			const commentCall = buildCommentListCall(current.notion_page_id, {});
+			const commentResult = (await conn.callTool(commentCall.tool, commentCall.args)) as Record<
+				string,
+				unknown
+			>;
+			const commentPayload = extractResultJson(commentResult, `beads push comments ${issue.id}`);
+			existingCommentsById.set(issue.id, normalizeBeadsCommentListPayload(commentPayload));
+			rawExistingComments.push({
+				beads_id: issue.id,
+				page_id: current.notion_page_id,
+				comments: commentResult,
+			});
+		}
 
 		const toCreate: BeadsPushIssue[] = [];
 		const toUpdate: Array<{ pageId: string; issue: BeadsPushIssue }> = [];
+		const toUpdateBody: Array<{
+			id: string;
+			title: string;
+			pageId: string;
+			body: string | null;
+		}> = [];
+		const toCreateComments: Array<{
+			id: string;
+			title: string;
+			pageId: string | null;
+			comments: BeadsIssueComment[];
+		}> = [];
+		const inputIds = new Set(input.issues.map((issue) => issue.id));
+		const toArchive = opts.archiveMissing
+			? listStoredBeadsStateEntries(state)
+					.filter((entry) => !inputIds.has(entry.id))
+					.map((entry) => ({
+						id: entry.id,
+						title: existingById.get(entry.id)?.title ?? null,
+						notion_page_id: entry.page_id,
+						reason: "missing_from_input",
+					}))
+			: [];
 		const skipped: Array<{
 			id: string;
 			title: string;
@@ -618,9 +1088,22 @@ async function runBeadsPush(opts: BeadsPushOptions, cmd: Command): Promise<void>
 			const current = existingById.get(issue.id);
 			if (!current) {
 				toCreate.push(issue);
+				const pendingCreateComments = planBeadsCommentCreates([], issue.comments);
+				if (pendingCreateComments.length > 0) {
+					toCreateComments.push({
+						id: issue.id,
+						title: issue.title,
+						pageId: null,
+						comments: pendingCreateComments,
+					});
+				}
 				continue;
 			}
-			if (issuesEqualForSync(current, issue)) {
+			const pendingComments = planBeadsCommentCreates(
+				existingCommentsById.get(issue.id) ?? [],
+				issue.comments,
+			);
+			if (issuesEqualForSync(current, issue) && pendingComments.length === 0) {
 				skipped.push({
 					id: issue.id,
 					title: issue.title,
@@ -637,14 +1120,41 @@ async function runBeadsPush(opts: BeadsPushOptions, cmd: Command): Promise<void>
 					'Retry with "ncli fetch <page-id> --raw" to inspect the raw payload',
 				);
 			}
-			toUpdate.push({ pageId: currentPageId, issue });
+			if (!issuesEqualForPropertySync(current, issue)) {
+				toUpdate.push({ pageId: currentPageId, issue });
+			}
+			if ((current.body ?? null) !== (issue.body ?? null)) {
+				toUpdateBody.push({
+					id: issue.id,
+					title: issue.title,
+					pageId: currentPageId,
+					body: issue.body,
+				});
+			}
+			if (pendingComments.length > 0) {
+				toCreateComments.push({
+					id: issue.id,
+					title: issue.title,
+					pageId: currentPageId,
+					comments: pendingComments,
+				});
+			}
 		}
 
 		const payload = {
 			dry_run: !!opts.dryRun,
+			archive_requested: !!opts.archiveMissing,
+			archive_supported: archiveSupport.supported,
+			archive_reason: archiveSupport.reason,
 			input_count: input.issues.length,
 			created_count: toCreate.length,
 			updated_count: toUpdate.length,
+			body_updated_count: toUpdateBody.length,
+			comments_created_count: toCreateComments.reduce(
+				(total, entry) => total + entry.comments.length,
+				0,
+			),
+			archived_count: toArchive.length,
 			skipped_count: skipped.length,
 			errors: [] as string[],
 			created: toCreate.map((issue) => ({
@@ -656,13 +1166,40 @@ async function runBeadsPush(opts: BeadsPushOptions, cmd: Command): Promise<void>
 				title: update.issue.title,
 				notion_page_id: update.pageId,
 			})),
+			body_updated: toUpdateBody.map((update) => ({
+				id: update.id,
+				title: update.title,
+				notion_page_id: update.pageId,
+				body: update.body,
+			})),
+			comments_created: toCreateComments.flatMap((entry) =>
+				entry.comments.map((comment) => ({
+					id: entry.id,
+					title: entry.title,
+					notion_page_id: entry.pageId,
+					discussion_id: comment.discussion_id,
+					body: comment.body,
+				})),
+			),
+			archived: toArchive,
 			skipped,
 		};
 
 		let createResult: Record<string, unknown> | null = null;
 		const updateResults: Array<{ id: string; result: Record<string, unknown> }> = [];
+		const bodyUpdateResults: Array<{ id: string; result: Record<string, unknown> }> = [];
+		const commentCreateResults: Array<{ id: string; result: Record<string, unknown> }> = [];
+		const archiveResults: Array<{ id: string; result: Record<string, unknown> }> = [];
 
 		if (!opts.dryRun) {
+			if (toArchive.length > 0 && !archiveSupport.supported) {
+				throw new CliError(
+					"Archive-missing is unavailable on the current live Notion MCP",
+					archiveSupport.reason ??
+						"The connected Notion MCP does not support archiving managed pages",
+					'Run "ncli beads push --archive-missing --dry-run ..." to inspect candidates, then archive or remove them manually in Notion for now',
+				);
+			}
 			if (toCreate.length > 0) {
 				const createCall = buildBeadsCreateCall(databaseInfo.data_source_id, toCreate);
 				createResult = (await conn.callTool(createCall.tool, createCall.args)) as Record<
@@ -681,6 +1218,10 @@ async function runBeadsPush(opts: BeadsPushOptions, cmd: Command): Promise<void>
 						typeof page.id === "string"
 					) {
 						state.page_ids[issue.id] = page.id;
+						const plannedComments = toCreateComments.find((entry) => entry.id === issue.id);
+						if (plannedComments) {
+							plannedComments.pageId = page.id;
+						}
 					}
 				}
 			}
@@ -693,15 +1234,57 @@ async function runBeadsPush(opts: BeadsPushOptions, cmd: Command): Promise<void>
 				updateResults.push({ id: update.issue.id, result });
 				state.page_ids[update.issue.id] = update.pageId;
 			}
+			for (const update of toUpdateBody) {
+				const updateCall = buildBeadsBodyUpdateCall(update.pageId, update.body);
+				const result = (await conn.callTool(updateCall.tool, updateCall.args)) as Record<
+					string,
+					unknown
+				>;
+				bodyUpdateResults.push({ id: update.id, result });
+			}
+			for (const commentPlan of toCreateComments) {
+				if (!commentPlan.pageId) {
+					throw new CliError(
+						"Missing target page for comment sync",
+						`Could not resolve a Notion page id for comments on issue ${commentPlan.id}`,
+						"Retry the push after confirming the page create result",
+					);
+				}
+				for (const comment of commentPlan.comments) {
+					const createCommentCall = buildCommentCreateCall(commentPlan.pageId, {
+						body: comment.body,
+						discussion: comment.discussion_id ?? undefined,
+					});
+					const result = (await conn.callTool(
+						createCommentCall.tool,
+						createCommentCall.args,
+					)) as Record<string, unknown>;
+					commentCreateResults.push({ id: commentPlan.id, result });
+				}
+			}
+			for (const archived of toArchive) {
+				const archiveCall = buildBeadsArchiveCall(archived.notion_page_id, archiveSupport);
+				const result = (await conn.callTool(archiveCall.tool, archiveCall.args)) as Record<
+					string,
+					unknown
+				>;
+				archiveResults.push({ id: archived.id, result });
+				delete state.page_ids[archived.id];
+			}
 			stateStore.save(state);
 		}
 
 		const rawPayload = {
 			plan: payload,
 			fetch: fetchResult,
+			archive_support: archiveSupport,
 			existing_pages: rawExistingPages,
+			existing_comments: rawExistingComments,
 			create: createResult,
 			updates: updateResults,
+			body_updates: bodyUpdateResults,
+			comment_creates: commentCreateResults,
+			archives: archiveResults,
 		};
 
 		printOutput(
@@ -729,13 +1312,15 @@ Examples:
 The command creates:
   - a dedicated Beads database
   - a default table view
-  - a saved beads config for later status/pull/push commands`,
+  - a saved beads config for later status/pull/push commands
+  - an empty saved beads state for managed page ids`,
 		)
 		.action(async (opts: BeadsInitOptions, cmd: Command) => {
 			await runBeadsInit(opts, cmd);
 		});
 
 	const config = beads.command("config").description("Manage saved Beads database configuration");
+	const state = beads.command("state").description("Inspect and manage saved Beads page state");
 
 	config
 		.command("set")
@@ -758,6 +1343,45 @@ The command creates:
 		.description("Clear saved Beads configuration")
 		.action((_opts: unknown, cmd: Command) => {
 			runBeadsConfigClear(cmd);
+		});
+
+	state
+		.command("show")
+		.description("Show saved Beads page state")
+		.action((_opts: unknown, cmd: Command) => {
+			runBeadsStateShow(cmd);
+		});
+
+	state
+		.command("export")
+		.description("Export saved Beads page state to a file or stdout")
+		.requiredOption("--output <path|->", "Export file path, or - for stdout")
+		.action(async (opts: BeadsStateExportOptions, cmd: Command) => {
+			await runBeadsStateExport(opts, cmd);
+		});
+
+	state
+		.command("import")
+		.description("Import saved Beads page state from a file or stdin")
+		.requiredOption("--input <path|->", "Import file path, or - for stdin")
+		.action(async (opts: BeadsStateImportOptions, cmd: Command) => {
+			await runBeadsStateImport(opts, cmd);
+		});
+
+	state
+		.command("doctor")
+		.description("Diagnose saved Beads page state against live Notion pages")
+		.addHelpText(
+			"after",
+			`
+Examples:
+  ncli beads state doctor
+  ncli beads state doctor --json
+
+Doctor checks the saved beads-state.json mappings without mutating Notion.`,
+		)
+		.action(async (_opts: unknown, cmd: Command) => {
+			await runBeadsStateDoctor(cmd);
 		});
 
 	beads
@@ -793,10 +1417,11 @@ Example:
   ncli beads pull --json
 
 Output:
-  { "issues": [{ "id": "bd-123", "title": "...", ... }] }
+  { "issues": [{ "id": "bd-123", "title": "...", "body": "...", "comments": [...] }] }
 
 Notes:
-  Pull reads the saved beads config and local manifest of managed page IDs.`,
+  Pull reads the saved beads config and local manifest of managed page IDs.
+  Each issue may include page body content in "body" and pulled page comments in "comments".`,
 		)
 		.action(async (opts: BeadsPullOptions, cmd: Command) => {
 			await runBeadsPull(opts, cmd);
@@ -810,19 +1435,27 @@ Notes:
 		.option("--input <path|->", 'Issue JSON file path, or "-" to read stdin')
 		.option("--data <json>", "Issue JSON string (overrides --input)")
 		.option("--dry-run", "Plan create/update changes without mutating Notion")
+		.option(
+			"--archive-missing",
+			"Plan archiving for managed pages missing from input; unsupported live archive stops before mutation",
+		)
 		.addHelpText(
 			"after",
 			`
 Examples:
   ncli beads push --dry-run --input issues.json
+  ncli beads push --archive-missing --dry-run --input issues.json
   ncli beads push --database-id <db-id> --view-url "view://<view-id>" --input issues.json
   echo '{"issues":[{"id":"bd-1","title":"Fix login"}]}' | ncli beads push --dry-run --input -
 
 Input JSON:
-  { "issues": [{ "id": "bd-123", "title": "Title", "status": "open" }] }
+  { "issues": [{ "id": "bd-123", "title": "Title", "description": "short summary", "body": "full page body", "comments": [{ "body": "new comment" }], "status": "open" }] }
 
 Matching uses the "Beads ID" property against the saved local manifest.
-When overriding saved config, pass both --database-id and --view-url.`,
+When overriding saved config, pass both --database-id and --view-url.
+Current live Notion MCP servers may reject archive execution; in that case
+--archive-missing still reports archived[] in --dry-run and fails fast before mutation.
+Comment sync is create-only for now: comments with comment_id are treated as existing and skipped.`,
 		)
 		.action(async (opts: BeadsPushOptions, cmd: Command) => {
 			await runBeadsPush(opts, cmd);

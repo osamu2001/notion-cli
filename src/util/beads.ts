@@ -91,12 +91,14 @@ export interface BeadsIssue {
 	id: string;
 	title: string;
 	description: string | null;
+	body: string | null;
 	status: string | null;
 	priority: string | null;
 	type: string | null;
 	issue_type: string | null;
 	assignee: string | null;
 	labels: string[];
+	comments: BeadsIssueComment[];
 	external_ref: string;
 	notion_page_id: string | null;
 	url: string | null;
@@ -104,16 +106,27 @@ export interface BeadsIssue {
 	updated_at: string | null;
 }
 
+export interface BeadsIssueComment {
+	comment_id: string | null;
+	discussion_id: string | null;
+	body: string;
+	author: string | null;
+	created_at: string | null;
+	url: string | null;
+}
+
 export interface BeadsPushIssue {
 	id: string;
 	title: string;
 	description: string | null;
+	body: string | null;
 	status: string | null;
 	priority: string | null;
 	type: string | null;
 	issue_type: string | null;
 	assignee: string | null;
 	labels: string[];
+	comments: BeadsIssueComment[];
 }
 
 export interface BeadsIssueSet {
@@ -344,6 +357,28 @@ function extractTaggedJsonRecord(text: string, tag: string, operation: string): 
 	return isRecord(parsed) ? parsed : null;
 }
 
+function extractTaggedText(text: string, tag: string): string | null {
+	const match = text.match(new RegExp(`<${tag}>\\s*([\\s\\S]*?)\\s*</${tag}>`, "i"));
+	return match?.[1] ?? null;
+}
+
+function normalizeMultilineText(value: string | null): string | null {
+	if (value === null) {
+		return null;
+	}
+	const normalized = value.replace(/\r\n/g, "\n").replace(/^\n+|\n+$/g, "");
+	return normalized.length > 0 ? normalized : null;
+}
+
+function decodeXmlText(text: string): string {
+	return text
+		.replaceAll("&lt;", "<")
+		.replaceAll("&gt;", ">")
+		.replaceAll("&amp;", "&")
+		.replaceAll("&quot;", '"')
+		.replaceAll("&#39;", "'");
+}
+
 export function extractBeadsDatabaseInfoFromText(text: string): BeadsDatabaseInfo {
 	const databaseTag = text.match(/<database\b[^>]*>/i)?.[0] ?? null;
 	const dataSourceTag = text.match(/<data-source\b[^>]*>/i)?.[0] ?? null;
@@ -403,6 +438,7 @@ export function normalizeBeadsPageFetchPayload(payload: JsonRecord): BeadsIssue 
 		id: requireString(properties, ["Beads ID", "beads_id"], '"Beads ID"', 0),
 		title: requireString(properties, ["Name", "title"], '"Name"', 0),
 		description: pickString(properties, ["Description", "description"]),
+		body: extractBeadsPageBodyFromText(text),
 		status: normalizeEnumValue(pickString(properties, ["Status", "status"]), STATUS_TO_NOTION),
 		priority: normalizeEnumValue(
 			pickString(properties, ["Priority", "priority"]),
@@ -412,12 +448,49 @@ export function normalizeBeadsPageFetchPayload(payload: JsonRecord): BeadsIssue 
 		issue_type: normalizeEnumValue(pickString(properties, ["Type", "type"]), TYPE_TO_NOTION),
 		assignee: pickString(properties, ["Assignee", "assignee"]),
 		labels: normalizeLabels(valueToStringArray(properties.Labels ?? properties.labels)),
+		comments: [],
 		external_ref: pageUrl ?? "",
 		notion_page_id: notionPageId,
 		url: pageUrl,
 		created_at: pickString(payload, ["created_at", "createdTime"]),
 		updated_at: pickString(payload, ["updated_at", "updatedTime"]),
 	};
+}
+
+export function extractBeadsPageBodyFromText(text: string): string | null {
+	if (/<blank-page>/i.test(text)) {
+		return null;
+	}
+	return normalizeMultilineText(extractTaggedText(text, "content"));
+}
+
+export function normalizeBeadsCommentListPayload(payload: JsonRecord): BeadsIssueComment[] {
+	const text = pickString(payload, ["text"]);
+	if (!text) {
+		return [];
+	}
+	const comments: BeadsIssueComment[] = [];
+	for (const discussionMatch of text.matchAll(/<discussion\b[^>]*>([\s\S]*?)<\/discussion>/gi)) {
+		const discussionOpenTag = discussionMatch[0].match(/^<discussion\b[^>]*>/i)?.[0] ?? "";
+		const discussionId = extractAttr(discussionOpenTag, "id");
+		const discussionBody = discussionMatch[1] ?? "";
+		for (const commentMatch of discussionBody.matchAll(/<comment\b[^>]*>([\s\S]*?)<\/comment>/gi)) {
+			const commentOpenTag = commentMatch[0].match(/^<comment\b[^>]*>/i)?.[0] ?? "";
+			const body = normalizeMultilineText(decodeXmlText(commentMatch[1] ?? ""));
+			if (!body) {
+				continue;
+			}
+			comments.push({
+				comment_id: extractAttr(commentOpenTag, "id"),
+				discussion_id: discussionId,
+				body,
+				author: extractAttr(commentOpenTag, "user-url"),
+				created_at: extractAttr(commentOpenTag, "datetime"),
+				url: extractAttr(commentOpenTag, "url"),
+			});
+		}
+	}
+	return comments;
 }
 
 export function extractViewUrlFromText(text: string): string | null {
@@ -518,6 +591,7 @@ export function normalizeBeadsQueryPayload(payload: JsonRecord): { issues: Beads
 				id: requireString(result, ["Beads ID", "beads_id"], '"Beads ID"', index),
 				title: requireString(result, ["Name", "title", "name"], '"Name"', index),
 				description: pickString(result, ["Description", "description"]),
+				body: null,
 				status: normalizeEnumValue(pickString(result, ["Status", "status"]), STATUS_TO_NOTION),
 				priority: normalizeEnumValue(
 					pickString(result, ["Priority", "priority"]),
@@ -527,6 +601,7 @@ export function normalizeBeadsQueryPayload(payload: JsonRecord): { issues: Beads
 				issue_type: issueType,
 				assignee: pickString(result, ["Assignee", "assignee"]),
 				labels: valueToStringArray(result.Labels ?? result.labels),
+				comments: [],
 				external_ref: url ?? (notionPageId ? `notion:${notionPageId}` : "notion:unknown"),
 				notion_page_id: notionPageId,
 				url,
@@ -537,7 +612,7 @@ export function normalizeBeadsQueryPayload(payload: JsonRecord): { issues: Beads
 	};
 }
 
-export function issuesEqualForSync(existing: BeadsIssue, next: BeadsPushIssue): boolean {
+export function issuesEqualForPropertySync(existing: BeadsIssue, next: BeadsPushIssue): boolean {
 	return (
 		existing.title === next.title &&
 		(existing.description ?? null) === (next.description ?? null) &&
@@ -548,6 +623,42 @@ export function issuesEqualForSync(existing: BeadsIssue, next: BeadsPushIssue): 
 		JSON.stringify(normalizeLabels(existing.labels)) ===
 			JSON.stringify(normalizeLabels(next.labels))
 	);
+}
+
+export function issuesEqualForSync(existing: BeadsIssue, next: BeadsPushIssue): boolean {
+	return (
+		issuesEqualForPropertySync(existing, next) && (existing.body ?? null) === (next.body ?? null)
+	);
+}
+
+function normalizePushComment(
+	value: unknown,
+	issueIndex: number,
+	commentIndex: number,
+): BeadsIssueComment {
+	if (!isRecord(value)) {
+		throw new CliError(
+			`Invalid beads comment at issue index ${issueIndex}, comment index ${commentIndex}`,
+			"Each comment must be a JSON object",
+			'Pass comments like {"body":"comment text"}',
+		);
+	}
+	const body = normalizeMultilineText(pickString(value, ["body", "text"]));
+	if (!body) {
+		throw new CliError(
+			`Invalid beads comment at issue index ${issueIndex}, comment index ${commentIndex}`,
+			'Each comment must include non-empty "body"',
+			'Pass comments like {"body":"comment text"}',
+		);
+	}
+	return {
+		comment_id: pickString(value, ["comment_id", "id"]),
+		discussion_id: pickString(value, ["discussion_id"]),
+		body,
+		author: pickString(value, ["author"]),
+		created_at: pickString(value, ["created_at"]),
+		url: pickString(value, ["url"]),
+	};
 }
 
 function normalizePushIssue(value: unknown, index: number): BeadsPushIssue {
@@ -575,16 +686,23 @@ function normalizePushIssue(value: unknown, index: number): BeadsPushIssue {
 		);
 	}
 	const issueType = pickString(value, ["type", "issue_type"]);
+	const comments = Array.isArray(value.comments)
+		? value.comments.map((comment, commentIndex) =>
+				normalizePushComment(comment, index, commentIndex),
+			)
+		: [];
 	return {
 		id,
 		title,
 		description: pickString(value, ["description"]),
+		body: normalizeMultilineText(pickString(value, ["body"])),
 		status: normalizeEnumValue(pickString(value, ["status"]), STATUS_TO_NOTION),
 		priority: normalizeEnumValue(pickString(value, ["priority"]), PRIORITY_TO_NOTION),
 		type: normalizeEnumValue(issueType, TYPE_TO_NOTION),
 		issue_type: normalizeEnumValue(issueType, TYPE_TO_NOTION),
 		assignee: pickString(value, ["assignee"]),
 		labels: valueToStringArray(value.labels),
+		comments,
 	};
 }
 

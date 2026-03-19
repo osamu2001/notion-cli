@@ -50,7 +50,9 @@ ncli page create --parent collection://<ds-id> \
 # Beads ワークフロー
 ncli beads init --parent <page-id>
 ncli beads status
+ncli beads state doctor
 ncli beads pull
+ncli beads push --archive-missing --dry-run --input issues.json
 ncli beads push --dry-run --input issues.json
 ```
 
@@ -64,8 +66,9 @@ ncli beads push --dry-run --input issues.json
 | `ncli search <query>` | ワークスペース内のページ・DB・ユーザーを検索 |
 | `ncli fetch <url-or-id>` | URL または ID でページ・DB・データソースを取得 |
 | `ncli beads status` | 認証、DB 接続、beads schema の準備状態を確認 |
-| `ncli beads pull` | ローカルで管理している Beads ページを issue JSON に pull |
-| `ncli beads push` | beads issue JSON からローカル管理下の Notion ページを作成・更新 |
+| `ncli beads state doctor` | 保存済み managed page state を Notion 非破壊で診断 |
+| `ncli beads pull` | ローカル管理中の Beads ページを property/body/comment 付きの issue JSON に pull |
+| `ncli beads push` | beads issue JSON からページ本文と新規コメントも含めて同期し、archive 候補も計画できる |
 | `ncli page create` | ページを作成（`--title`, `--parent`, `--prop`, `--body`） |
 | `ncli page update <id>` | ページのプロパティまたはコンテンツを更新 |
 | `ncli page move <id...> --to <parent>` | ページを別の親に移動 |
@@ -139,15 +142,25 @@ ncli beads init --parent <page-id> --json
 # 接続と schema を確認
 ncli beads status --json
 
+# 保存済み managed page state を確認
+ncli beads state show --json
+ncli beads state doctor --json
+
 # ローカル管理中の issue JSON を pull
 ncli beads pull --json
 
 # issue JSON を Notion に push ("Beads ID" でマッチ)
-echo '{"issues":[{"id":"bd-1","title":"Fix login","status":"open"}]}' | \
+echo '{"issues":[{"id":"bd-1","title":"Fix login","description":"short summary","body":"full body","comments":[{"body":"new comment"}],"status":"open"}]}' | \
   ncli beads push --dry-run --input - --json
+
+# input にない managed page の archive 候補を dry-run で確認
+echo '{"issues":[]}' | \
+  ncli beads push --archive-missing --dry-run --input - --json
 ```
 
-`push` は `Beads ID` をキーに冪等に create/update します。v1 では delete/archive や page body 同期は行いません。
+`description` は Notion の `Description` property に残す短文サマリです。 `body` はページ本文に対応します。 `comments` は push では create-only で、pull 済みコメントの `comment_id` を持つものは既存扱いで再作成しません。
+
+`push` は `Beads ID` をキーに property/body/create-only comment を冪等に同期します。 `--archive-missing` は dry-run では `archived[]` を返しますが、current live Notion MCP では archive 実行自体は未対応のため、archive 候補がある live 実行は mutate 前に fail-fast します。
 
 ### stdin からコンテンツをパイプ
 

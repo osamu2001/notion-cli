@@ -50,7 +50,9 @@ ncli page create --parent collection://<ds-id> \
 # Beads workflow
 ncli beads init --parent <page-id>
 ncli beads status
+ncli beads state doctor
 ncli beads pull
+ncli beads push --archive-missing --dry-run --input issues.json
 ncli beads push --dry-run --input issues.json
 ```
 
@@ -64,8 +66,9 @@ ncli beads push --dry-run --input issues.json
 | `ncli search <query>` | Search pages, databases, and users across workspace |
 | `ncli fetch <url-or-id>` | Retrieve a page, database, or data source by URL or ID |
 | `ncli beads status` | Check auth, database wiring, and beads schema readiness |
-| `ncli beads pull` | Pull locally managed Beads pages into normalized issue JSON |
-| `ncli beads push` | Create or update locally managed Notion pages from beads issue JSON |
+| `ncli beads state doctor` | Inspect saved managed-page state without mutating Notion |
+| `ncli beads pull` | Pull managed Beads pages with property/body/comment data into normalized issue JSON |
+| `ncli beads push` | Create/update managed Notion pages, sync page body, create new comments, and optionally plan archive-missing candidates |
 | `ncli page create` | Create a page (with `--title`, `--parent`, `--prop`, `--body`) |
 | `ncli page update <id>` | Update page properties or content |
 | `ncli page move <id...> --to <parent>` | Move pages to a new parent |
@@ -139,15 +142,25 @@ ncli beads init --parent <page-id> --json
 # Check auth + wiring + schema
 ncli beads status --json
 
+# Inspect saved managed page mappings
+ncli beads state show --json
+ncli beads state doctor --json
+
 # Pull locally managed issue JSON
 ncli beads pull --json
 
 # Push issues back into Notion (match by "Beads ID")
-echo '{"issues":[{"id":"bd-1","title":"Fix login","status":"open"}]}' | \
+echo '{"issues":[{"id":"bd-1","title":"Fix login","description":"short summary","body":"full body","comments":[{"body":"new comment"}],"status":"open"}]}' | \
   ncli beads push --dry-run --input - --json
+
+# Plan archive candidates for managed pages that are missing from input
+echo '{"issues":[]}' | \
+  ncli beads push --archive-missing --dry-run --input - --json
 ```
 
-`push` is idempotent on `Beads ID`. v1 creates missing rows and updates existing rows, but does not delete, archive, or sync page body content.
+`description` stays mapped to the Notion `Description` property as a short summary. `body` maps to the page body content. `comments` is create-only in push: pulled comments include `comment_id`, and push only creates comments that do not already carry a `comment_id`.
+
+`push` is idempotent on `Beads ID` for properties/body and create-only comments. `--archive-missing` reports `archived[]` in dry-run, but current live Notion MCP servers still reject real archive execution, so live runs fail fast before mutation when archive candidates exist.
 
 ### Pipe content from stdin
 
