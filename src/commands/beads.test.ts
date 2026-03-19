@@ -4,6 +4,8 @@ import {
 	buildBeadsAuthCall,
 	buildBeadsCreateCall,
 	buildBeadsFetchCall,
+	buildBeadsInitDbCall,
+	buildBeadsInitViewCall,
 	buildBeadsPullCall,
 	buildBeadsUpdateCall,
 	registerBeadsCommands,
@@ -32,6 +34,30 @@ describe("buildBeadsPullCall", () => {
 		expect(buildBeadsPullCall("view://abc")).toEqual({
 			tool: "notion-query-database-view",
 			args: { view_url: "view://abc" },
+		});
+	});
+});
+
+describe("buildBeadsInitDbCall", () => {
+	it("builds the dedicated beads database create call", () => {
+		const result = buildBeadsInitDbCall("page-1", "Beads Issues");
+		expect(result.tool).toBe("notion-create-database");
+		expect(result.args.title).toBe("Beads Issues");
+		expect(result.args.parent).toEqual({ page_id: "page-1", type: "page_id" });
+		expect(result.args.schema).toContain(`"Beads ID" RICH_TEXT`);
+	});
+});
+
+describe("buildBeadsInitViewCall", () => {
+	it("builds the default view create call", () => {
+		expect(buildBeadsInitViewCall("db-1", "ds-1", "All Issues")).toEqual({
+			tool: "notion-create-view",
+			args: {
+				database_id: "db-1",
+				data_source_id: "collection://ds-1",
+				type: "table",
+				name: "All Issues",
+			},
 		});
 	});
 });
@@ -101,11 +127,20 @@ describe("buildBeadsUpdateCall", () => {
 });
 
 describe("registerBeadsCommands", () => {
-	it("registers status, pull, and push subcommands", () => {
+	it("registers init, config, status, pull, and push subcommands", () => {
 		const program = new Command();
 		registerBeadsCommands(program);
 		const beads = program.commands.find((command) => command.name() === "beads");
 		expect(beads).toBeDefined();
-		expect(beads?.commands.map((command) => command.name())).toEqual(["status", "pull", "push"]);
+		expect(beads?.commands.map((command) => command.name())).toEqual([
+			"init",
+			"config",
+			"status",
+			"pull",
+			"push",
+		]);
+
+		const config = beads?.commands.find((command) => command.name() === "config");
+		expect(config?.commands.map((command) => command.name())).toEqual(["set", "show", "clear"]);
 	});
 });

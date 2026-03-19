@@ -1,6 +1,10 @@
 import { extractText } from "../output/json.js";
 import { CliError } from "./errors.js";
 
+export const BEADS_SCHEMA_VERSION = "beads/v1";
+export const BEADS_DEFAULT_DATABASE_TITLE = "Beads Issues";
+export const BEADS_DEFAULT_VIEW_NAME = "All Issues";
+
 export const BEADS_REQUIRED_PROPERTIES = [
 	"Name",
 	"Beads ID",
@@ -136,9 +140,17 @@ function normalizeEnumKey(value: string): string {
 		.replace(/^_+|_+$/g, "");
 }
 
+function escapeSqlIdentifier(value: string): string {
+	return value.replaceAll('"', '""');
+}
+
+function unwrapNotionAttr(value: string): string {
+	return value.replace(/^\{\{/, "").replace(/\}\}$/, "");
+}
+
 function extractAttr(tag: string, name: string): string | null {
 	const match = new RegExp(`${name}="([^"]+)"`, "i").exec(tag);
-	return match?.[1] ?? null;
+	return match?.[1] ? unwrapNotionAttr(match[1]) : null;
 }
 
 function parseJsonText(text: string, operation: string): JsonRecord {
@@ -279,6 +291,18 @@ function normalizePropertyName(name: string): string | null {
 	return PROPERTY_NAME_ALIASES.get(normalized) ?? name;
 }
 
+function normalizeLabels(labels: string[]): string[] {
+	return [...labels]
+		.map((label) => label.trim())
+		.filter(Boolean)
+		.sort((a, b) => a.localeCompare(b));
+}
+
+export function buildBeadsDatabaseSchema(title: string = BEADS_DEFAULT_DATABASE_TITLE): string {
+	const tableName = escapeSqlIdentifier(title);
+	return `CREATE TABLE "${tableName}" ("Name" TITLE, "Beads ID" RICH_TEXT, "Status" SELECT('Open','In Progress','Blocked','Deferred','Closed'), "Priority" SELECT('Critical','High','Medium','Low','Backlog'), "Type" SELECT('Bug','Feature','Task','Epic','Chore'), "Description" RICH_TEXT, "Assignee" RICH_TEXT, "Labels" MULTI_SELECT)`;
+}
+
 export function extractResultJson(result: JsonRecord, operation: string): JsonRecord {
 	if (!("content" in result)) {
 		return result;
@@ -292,6 +316,32 @@ export function extractResultJson(result: JsonRecord, operation: string): JsonRe
 		);
 	}
 	return parseJsonText(text, operation);
+}
+
+export function extractResultText(result: JsonRecord, operation: string): string {
+	const parsed = extractResultJson(result, operation);
+	const text = pickString(parsed, ["result", "text"]);
+	if (text !== null) {
+		return text;
+	}
+	const fallback = extractText(parsed).trim();
+	if (fallback && fallback !== JSON.stringify(parsed)) {
+		return fallback;
+	}
+	throw new CliError(
+		`Invalid ${operation} response`,
+		`${operation} did not include a text result payload`,
+		"Retry the command with --raw to inspect the full payload",
+	);
+}
+
+function extractTaggedJsonRecord(text: string, tag: string, operation: string): JsonRecord | null {
+	const match = text.match(new RegExp(`<${tag}>\\s*([\\s\\S]*?)\\s*</${tag}>`, "i"));
+	if (!match) {
+		return null;
+	}
+	const parsed = parseAnyJson(match[1].trim(), operation);
+	return isRecord(parsed) ? parsed : null;
 }
 
 export function extractBeadsDatabaseInfoFromText(text: string): BeadsDatabaseInfo {
@@ -322,12 +372,69 @@ export function extractBeadsDatabaseInfoFromText(text: string): BeadsDatabaseInf
 	};
 }
 
+export function detectBeadsPropertiesFromFetchText(text: string): string[] {
+	const state = extractTaggedJsonRecord(text, "data-source-state", "beads fetch schema");
+	if (!state || !isRecord(state.schema)) {
+		return [];
+	}
+	return Object.keys(state.schema);
+}
+
+export function normalizeBeadsPageFetchPayload(payload: JsonRecord): BeadsIssue {
+	const text = pickString(payload, ["text"]);
+	if (!text) {
+		throw new CliError(
+			"Invalid beads page fetch response",
+			"Notion page fetch did not include a text payload",
+			'Retry with "ncli fetch <page-id> --raw" to inspect the raw response',
+		);
+	}
+	const properties = extractTaggedJsonRecord(text, "properties", "beads page properties");
+	if (!properties) {
+		throw new CliError(
+			"Invalid beads page fetch response",
+			"Notion page fetch did not include a <properties> JSON block",
+			'Retry with "ncli fetch <page-id> --raw" to inspect the raw response',
+		);
+	}
+	const pageUrl = pickString(properties, ["url"]) ?? pickString(payload, ["url"]);
+	const notionPageId = pageUrl ? extractPageIdFromUrl(pageUrl) : null;
+	return {
+		id: requireString(properties, ["Beads ID", "beads_id"], '"Beads ID"', 0),
+		title: requireString(properties, ["Name", "title"], '"Name"', 0),
+		description: pickString(properties, ["Description", "description"]),
+		status: normalizeEnumValue(pickString(properties, ["Status", "status"]), STATUS_TO_NOTION),
+		priority: normalizeEnumValue(
+			pickString(properties, ["Priority", "priority"]),
+			PRIORITY_TO_NOTION,
+		),
+		type: normalizeEnumValue(pickString(properties, ["Type", "type"]), TYPE_TO_NOTION),
+		issue_type: normalizeEnumValue(pickString(properties, ["Type", "type"]), TYPE_TO_NOTION),
+		assignee: pickString(properties, ["Assignee", "assignee"]),
+		labels: normalizeLabels(valueToStringArray(properties.Labels ?? properties.labels)),
+		external_ref: pageUrl ?? "",
+		notion_page_id: notionPageId,
+		url: pageUrl,
+		created_at: pickString(payload, ["created_at", "createdTime"]),
+		updated_at: pickString(payload, ["updated_at", "updatedTime"]),
+	};
+}
+
+export function extractViewUrlFromText(text: string): string | null {
+	const attrMatch = text.match(/url="(?:\{\{)?(view:\/\/[^"]+?)(?:\}\})?"/i);
+	if (attrMatch) {
+		return attrMatch[1];
+	}
+	const directMatch = text.match(/(?:\{\{)?(view:\/\/[0-9a-z-]+)(?:\}\})?/i);
+	return directMatch?.[1] ?? null;
+}
+
 export function extractPageIdFromUrl(url: string): string | null {
 	const directMatch = url.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
 	if (directMatch) {
 		return directMatch[1];
 	}
-	const compactMatch = url.match(/([0-9a-f]{32})(?:\?|$)/i);
+	const compactMatch = url.match(/([0-9a-f]{32})(?![0-9a-f])/i);
 	if (!compactMatch) {
 		return null;
 	}
@@ -374,6 +481,17 @@ export function assessBeadsSchema(detectedProperties: string[], checked = true):
 	};
 }
 
+export function findDuplicateBeadsIds(ids: string[]): string[] {
+	const counts = new Map<string, number>();
+	for (const id of ids) {
+		counts.set(id, (counts.get(id) ?? 0) + 1);
+	}
+	return [...counts.entries()]
+		.filter(([, count]) => count > 1)
+		.map(([id]) => id)
+		.sort((a, b) => a.localeCompare(b));
+}
+
 export function normalizeBeadsQueryPayload(payload: JsonRecord): { issues: BeadsIssue[] } {
 	const results = payload.results;
 	if (!Array.isArray(results)) {
@@ -417,6 +535,19 @@ export function normalizeBeadsQueryPayload(payload: JsonRecord): { issues: Beads
 			};
 		}),
 	};
+}
+
+export function issuesEqualForSync(existing: BeadsIssue, next: BeadsPushIssue): boolean {
+	return (
+		existing.title === next.title &&
+		(existing.description ?? null) === (next.description ?? null) &&
+		(existing.status ?? null) === (next.status ?? null) &&
+		(existing.priority ?? null) === (next.priority ?? null) &&
+		(existing.type ?? existing.issue_type ?? null) === (next.type ?? next.issue_type ?? null) &&
+		(existing.assignee ?? null) === (next.assignee ?? null) &&
+		JSON.stringify(normalizeLabels(existing.labels)) ===
+			JSON.stringify(normalizeLabels(next.labels))
+	);
 }
 
 function normalizePushIssue(value: unknown, index: number): BeadsPushIssue {

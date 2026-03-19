@@ -2,7 +2,7 @@ import type { Command } from "commander";
 import { withConnection } from "../mcp/with-connection.js";
 import { printOutput } from "../output/json.js";
 import { parseDbProps } from "../util/db-props.js";
-import { parseJsonData } from "../util/errors.js";
+import { CliError, parseJsonData } from "../util/errors.js";
 
 interface DbCreateOptions {
 	title?: string;
@@ -69,6 +69,10 @@ export function buildDbQueryCall(viewUrl: string): {
 	return { tool: "notion-query-database-view", args: { view_url: viewUrl } };
 }
 
+export function supportsDbQueryTool(tools: Array<{ name?: string }>): boolean {
+	return tools.some((tool) => tool.name === "notion-query-database-view");
+}
+
 export function registerDbCommands(program: Command): void {
 	const db = program.command("db").description("Create, update, or query databases");
 
@@ -130,7 +134,7 @@ Statements: ADD COLUMN, DROP COLUMN, RENAME COLUMN "Old" TO "New", ALTER COLUMN 
 		});
 
 	db.command("query")
-		.description("Query a database view (uses the view's existing filters/sorts)")
+		.description("Query a database view when the connected live MCP exposes query support")
 		.argument("<view-url>", "Database view URL (must include ?v=<view-id>)")
 		.addHelpText(
 			"after",
@@ -140,11 +144,20 @@ Example:
 
 Requires a view URL with ?v= parameter (not just a DB URL).
 To get view URLs: run "ncli fetch <db-id>".
-If no views exist: create one with "ncli view create".`,
+If no views exist: create one with "ncli view create".
+Current live Notion MCP servers may omit query support entirely; in that case this command fails fast with a hint.`,
 		)
 		.action(async (viewUrl: string, _opts: unknown, cmd: Command) => {
 			const { tool, args } = buildDbQueryCall(viewUrl);
 			await withConnection(async (conn) => {
+				const tools = await conn.listTools();
+				if (!supportsDbQueryTool(tools)) {
+					throw new CliError(
+						"Database query is unavailable on the current live Notion MCP",
+						"The connected Notion MCP server does not expose notion-query-database-view",
+						'Use "ncli fetch <db-id>" to inspect schema/views, or use dedicated flows like "ncli beads ..." for managed sync',
+					);
+				}
 				const result = await conn.callTool(tool, args);
 				printOutput(result as Record<string, unknown>, cmd.optsWithGlobals());
 			});

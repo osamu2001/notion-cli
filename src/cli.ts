@@ -40,8 +40,9 @@ Quick start:
   ncli page create --title "New" --parent <id> # Create a page
   ncli page update <id> --prop "Status=Done"   # Update properties
 
-Workflow: search → fetch (get IDs/schema) → create/update/query
+Workflow: search → fetch (get IDs/schema) → create/update
 For databases: always "ncli fetch <db-id>" first to get data_source_id.
+Query support depends on the connected live MCP exposing notion-query-database-view.
 Use --json for structured output. Errors include recovery hints.
 Run "ncli <command> --help" for details, examples, and tips (e.g. "ncli db create --help").`,
 	);

@@ -1,13 +1,27 @@
 import { describe, expect, it } from "vitest";
 import {
 	assessBeadsSchema,
+	BEADS_DEFAULT_DATABASE_TITLE,
+	buildBeadsDatabaseSchema,
 	buildBeadsProperties,
 	detectBeadsPropertiesFromQueryPayload,
 	extractBeadsDatabaseInfoFromText,
 	extractPageIdFromUrl,
+	extractViewUrlFromText,
+	findDuplicateBeadsIds,
+	issuesEqualForSync,
 	normalizeBeadsPushInput,
 	normalizeBeadsQueryPayload,
 } from "./beads.js";
+
+describe("buildBeadsDatabaseSchema", () => {
+	it("builds the fixed beads schema", () => {
+		expect(buildBeadsDatabaseSchema()).toContain(`CREATE TABLE "${BEADS_DEFAULT_DATABASE_TITLE}"`);
+		expect(buildBeadsDatabaseSchema()).toContain(`"Name" TITLE`);
+		expect(buildBeadsDatabaseSchema()).toContain(`"Beads ID" RICH_TEXT`);
+		expect(buildBeadsDatabaseSchema()).toContain(`"Labels" MULTI_SELECT`);
+	});
+});
 
 describe("extractBeadsDatabaseInfoFromText", () => {
 	it("extracts database, data source, and views from fetch text", () => {
@@ -26,6 +40,14 @@ describe("extractBeadsDatabaseInfoFromText", () => {
 			{ name: "All", url: "view://view-1", type: "table" },
 			{ name: "Open", url: "view://view-2", type: "board" },
 		]);
+	});
+});
+
+describe("extractViewUrlFromText", () => {
+	it("extracts a view url from create-view output", () => {
+		expect(extractViewUrlFromText(`Created view "All" (table) — view://abcd-1234`)).toBe(
+			"view://abcd-1234",
+		);
 	});
 });
 
@@ -63,6 +85,15 @@ describe("assessBeadsSchema", () => {
 		const schema = assessBeadsSchema(["Name", "Beads ID", "Status"], true);
 		expect(schema.missing).toEqual(["Priority", "Type", "Description"]);
 		expect(schema.optional_missing).toEqual(["Assignee", "Labels"]);
+	});
+});
+
+describe("findDuplicateBeadsIds", () => {
+	it("returns duplicate ids once", () => {
+		expect(findDuplicateBeadsIds(["bd-1", "bd-2", "bd-1", "bd-3", "bd-2"])).toEqual([
+			"bd-1",
+			"bd-2",
+		]);
 	});
 });
 
@@ -134,6 +165,42 @@ describe("normalizeBeadsPushInput", () => {
 	});
 });
 
+describe("issuesEqualForSync", () => {
+	it("treats matching issues as equal even if labels order differs", () => {
+		expect(
+			issuesEqualForSync(
+				{
+					id: "bd-1",
+					title: "Issue",
+					description: "desc",
+					status: "open",
+					priority: "high",
+					type: "task",
+					issue_type: "task",
+					assignee: "osamu",
+					labels: ["b", "a"],
+					external_ref: "notion:page-1",
+					notion_page_id: "page-1",
+					url: "https://www.notion.so/page-1",
+					created_at: null,
+					updated_at: null,
+				},
+				{
+					id: "bd-1",
+					title: "Issue",
+					description: "desc",
+					status: "open",
+					priority: "high",
+					type: "task",
+					issue_type: "task",
+					assignee: "osamu",
+					labels: ["a", "b"],
+				},
+			),
+		).toBe(true);
+	});
+});
+
 describe("buildBeadsProperties", () => {
 	it("maps normalized beads issue values back to Notion properties", () => {
 		expect(
@@ -158,5 +225,21 @@ describe("buildBeadsProperties", () => {
 			Assignee: "osamu",
 			Labels: ["release"],
 		});
+	});
+
+	it("rejects unsupported enum values at property build time", () => {
+		expect(() =>
+			buildBeadsProperties({
+				id: "bd-7",
+				title: "Ship it",
+				description: null,
+				status: "invalid",
+				priority: null,
+				type: null,
+				issue_type: null,
+				assignee: null,
+				labels: [],
+			}),
+		).toThrow("Invalid beads status");
 	});
 });

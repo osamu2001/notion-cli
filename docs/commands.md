@@ -30,16 +30,16 @@ ncli api <tool-name> [json]     # raw escape hatch
 |---|---|---|
 | `search <query>` | `notion-search` | **`query`**, `query_type`, `content_search_mode`, `page_size`, `filters` |
 | `fetch <url-or-id>` | `notion-fetch` | **`id`**, `include_transcript`, `include_discussions` |
-| `beads status --database-id <id> [--view-url <url>]` | `notion-get-users` + `notion-fetch` + optional `notion-query-database-view` | self auth check, database fetch, optional schema validation via view query |
-| `beads pull --view-url <url>` | `notion-query-database-view` | **`view_url`** |
-| `beads push --database-id <id> --view-url <url> --input <path|->` | `notion-fetch` + `notion-query-database-view` + `notion-create-pages` + `notion-update-page` | dedicated beads DB sync (match by `Beads ID`) |
+| `beads status [--database-id <id>] [--view-url <url>]` | `notion-get-users` + `notion-fetch` | self auth check, database fetch, schema validation from database fetch text, saved manifest summary |
+| `beads pull` | `notion-fetch` | saved config + local manifest of managed page IDs |
+| `beads push [--database-id <id> --view-url <url>] --input <path|->` | `notion-fetch` + `notion-create-pages` + `notion-update-page` | dedicated beads DB sync using saved manifest entries matched by `Beads ID` |
 | `page create` | `notion-create-pages` | **`pages`** (配列: `{ properties, content, icon, cover }`), `parent` (`{ page_id \| database_id \| data_source_id, type }`) |
 | `page update <id>` | `notion-update-page` | **`page_id`**, **`command`** (`update_properties` / `update_content` / `replace_content` / `apply_template` / `update_verification`), `properties`, `new_str`, `content_updates`, `icon`, `cover` |
 | `page move <id>...` | `notion-move-pages` | **`page_or_database_ids`** (配列), **`new_parent`** (`{ page_id \| database_id \| data_source_id \| workspace, type }`) |
 | `page duplicate <id>` | `notion-duplicate-page` | **`page_id`** |
 | `db create` | `notion-create-database` | **`schema`** (SQL DDL), `parent` (`{ page_id, type }`), `title`, `description` |
 | `db update <id>` | `notion-update-data-source` | **`data_source_id`**, `statements` (SQL DDL), `title`, `description` |
-| `db query <view-url>` | `notion-query-database-view` | **`view_url`** |
+| `db query <view-url>` | `notion-query-database-view` (if available) | **`view_url`** |
 | `view create` | `notion-create-view` | **`database_id`**, **`data_source_id`**, `type`, `name` 等 (`--data` 推奨) |
 | `view update` | `notion-update-view` | `view_id`, `name` 等 (`--data` 推奨) |
 | `comment create <id>` | `notion-create-comment` | **`rich_text`** (配列), **`page_id`**, `discussion_id`, `selection_with_ellipsis` |
@@ -49,6 +49,7 @@ ncli api <tool-name> [json]     # raw escape hatch
 | `meeting-notes query` | `notion-query-meeting-notes` | `filter` (ネストされたフィルタオブジェクト) |
 
 > `notion-query-data-sources` (Enterprise+AI), `notion-get-user`, `notion-get-self` はドキュメント記載ありだが実測で非存在。
+> `notion-query-database-view` も current live MCP では未提供のことがあり、その場合 `ncli db query` は fail-fast する。
 > プラン制限またはサーバー側の変更の可能性。`ncli api` escape hatch で動的にアクセス可能。
 
 ## CLI 引数 → MCP 引数マッピング
@@ -135,6 +136,8 @@ MCP: { data_source_id: "ds-id", title: "New Title", statements: "ADD COLUMN \"Pr
 CLI: ncli db query "view://view-id"
 MCP: { view_url: "view://view-id" }
 ```
+
+Connected live MCP must expose `notion-query-database-view`. If it does not, use `ncli fetch <db-id>` to inspect schema and view metadata instead.
 
 ### `ncli comment create <page-id>`
 
@@ -285,6 +288,7 @@ $ ncli db update <data-source-id> --statements 'ADD COLUMN "Priority" SELECT'
 
 ```bash
 # view URL が必要 (ncli fetch <db-id> で取得、なければ view create)
+# さらに connected live MCP が notion-query-database-view を公開している必要がある
 $ ncli db query "https://www.notion.so/<db-id>?v=<view-id>"
 {
   "results": [
@@ -375,16 +379,18 @@ ncli fetch <id> --raw           # MCP 生レスポンス (isError フラグ等�
 - `Labels`
 
 ```bash
+# 専用 Beads DB を作成して config を保存
+ncli beads init --parent <page-id> --json
+
 # 接続と schema の確認
-ncli beads status --database-id <db-id> --view-url "view://<view-id>" --json
+ncli beads status --json
 
-# Notion view を beads 向け JSON に正規化
-ncli beads pull --view-url "view://<view-id>" --json
+# ローカル管理中の Notion ページを pull
+ncli beads pull --json
 
-# beads issue JSON を Notion に反映
+# beads issue JSON を dry-run で確認してから反映
 cat issues.json | ncli beads push \
-  --database-id <db-id> \
-  --view-url "view://<view-id>" \
+  --dry-run \
   --input - \
   --json
 ```
@@ -394,10 +400,10 @@ cat issues.json | ncli beads push \
 ### エラー出力例
 
 ```bash
-$ ncli db query "https://www.notion.so/invalid-url"
-Error: notion-query-database-view failed
-  Why: Invalid database view URL: https://www.notion.so/invalid-url
-  Hint: Use a view URL with ?v= parameter. Run "ncli fetch <db-id>" to find view URLs, or create one with "ncli view create"
+$ ncli db query "https://www.notion.so/<db-id>?v=<view-id>"
+Error: Database query is unavailable on the current live Notion MCP
+  Why: The connected Notion MCP server does not expose notion-query-database-view
+  Hint: Use "ncli fetch <db-id>" to inspect schema/views, or use dedicated flows like "ncli beads ..." for managed sync
 
 # --json 時のエラー
 $ ncli page create --data '{bad}' --json
@@ -412,11 +418,14 @@ ncli search "プロジェクト計画"               # → results[].id を取�
 ncli fetch <id>                              # → 内容を確認
 ncli page update <id> --prop "Status=Done"   # → プロパティ更新
 
-# 2. DB 作成 → ページ追加 → クエリ
+# 2. DB 作成 → ページ追加 → query 対応時のみクエリ
 ncli db create --title "タスク" --parent <page-id> --prop "Name:title" --prop "Status:select=Open,Done"
 # → レスポンスから data_source_id (collection://...) を取得
 ncli page create --data '{"pages":[{"properties":{"Name":"タスク1","Status":"Open"}}],"parent":{"data_source_id":"<ds-id>","type":"data_source_id"}}'
 ncli view create --data '{"database_id":"<db-id>","data_source_id":"collection://<ds-id>","type":"table","name":"All"}'
 # → レスポンスから view URL (view://...) を取得
 ncli db query "https://www.notion.so/<db-id>?v=<view-id>"
+
+# query 非対応の live MCP では fetch を使って schema/view 情報だけ確認
+ncli fetch <db-id>
 ```

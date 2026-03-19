@@ -5,6 +5,7 @@ import {
 	buildDbQueryCall,
 	buildDbUpdateCall,
 	registerDbCommands,
+	supportsDbQueryTool,
 } from "./db.js";
 
 describe("buildDbCreateCall", () => {
@@ -98,6 +99,15 @@ describe("buildDbQueryCall", () => {
 		const result = buildDbQueryCall("https://notion.so/ws/db?v=view-id");
 		expect(result.tool).toBe("notion-query-database-view");
 		expect(result.args.view_url).toBe("https://notion.so/ws/db?v=view-id");
+	});
+});
+
+describe("supportsDbQueryTool", () => {
+	it("returns true only when notion-query-database-view is present", () => {
+		expect(supportsDbQueryTool([{ name: "notion-fetch" }])).toBe(false);
+		expect(
+			supportsDbQueryTool([{ name: "notion-fetch" }, { name: "notion-query-database-view" }]),
+		).toBe(true);
 	});
 });
 

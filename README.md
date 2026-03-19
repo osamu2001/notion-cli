@@ -48,9 +48,10 @@ ncli page create --parent collection://<ds-id> \
   --title "Task 1" --prop "Status=Open"
 
 # Beads workflow
-ncli beads status --database-id <db-id> --view-url "view://<view-id>"
-ncli beads pull --view-url "view://<view-id>"
-ncli beads push --database-id <db-id> --view-url "view://<view-id>" --input issues.json
+ncli beads init --parent <page-id>
+ncli beads status
+ncli beads pull
+ncli beads push --dry-run --input issues.json
 ```
 
 ## Commands
@@ -63,15 +64,15 @@ ncli beads push --database-id <db-id> --view-url "view://<view-id>" --input issu
 | `ncli search <query>` | Search pages, databases, and users across workspace |
 | `ncli fetch <url-or-id>` | Retrieve a page, database, or data source by URL or ID |
 | `ncli beads status` | Check auth, database wiring, and beads schema readiness |
-| `ncli beads pull` | Convert a dedicated Notion beads view into normalized beads issue JSON |
-| `ncli beads push` | Create or update Notion rows from beads issue JSON |
+| `ncli beads pull` | Pull locally managed Beads pages into normalized issue JSON |
+| `ncli beads push` | Create or update locally managed Notion pages from beads issue JSON |
 | `ncli page create` | Create a page (with `--title`, `--parent`, `--prop`, `--body`) |
 | `ncli page update <id>` | Update page properties or content |
 | `ncli page move <id...> --to <parent>` | Move pages to a new parent |
 | `ncli page duplicate <id>` | Duplicate a page |
 | `ncli db create` | Create a database (with `--title`, `--parent`, `--prop`, or `--schema`) |
 | `ncli db update <id>` | Update database schema or metadata |
-| `ncli db query <view-url>` | Query a database view |
+| `ncli db query <view-url>` | Query a database view when the connected live MCP exposes query support |
 | `ncli view create` | Create a database view (via `--data`) |
 | `ncli view update` | Update a database view (via `--data`) |
 | `ncli comment create <id>` | Add a comment to a page |
@@ -105,9 +106,12 @@ ncli db create --title "Tasks" --parent <page-id> \
 ncli page create --parent collection://<ds-id> \
   --title "Task 1" --prop "Status=Open"
 
-# Create a view and query
+# Create a view and query when the connected live MCP supports it
 ncli view create --data '{"database_id":"<db-id>","data_source_id":"collection://<ds-id>","type":"table","name":"All"}'
 ncli db query "https://www.notion.so/<db-id>?v=<view-id>"
+
+# If query support is unavailable, inspect schema/view metadata instead
+ncli fetch <db-id>
 ```
 
 ### Sync a dedicated Beads issue database
@@ -129,15 +133,18 @@ Optional properties:
 - `Labels`
 
 ```bash
-# Check auth + wiring + schema
-ncli beads status --database-id <db-id> --view-url "view://<view-id>" --json
+# Initialize a dedicated Beads DB and save config
+ncli beads init --parent <page-id> --json
 
-# Pull normalized issue JSON
-ncli beads pull --view-url "view://<view-id>" --json
+# Check auth + wiring + schema
+ncli beads status --json
+
+# Pull locally managed issue JSON
+ncli beads pull --json
 
 # Push issues back into Notion (match by "Beads ID")
 echo '{"issues":[{"id":"bd-1","title":"Fix login","status":"open"}]}' | \
-  ncli beads push --database-id <db-id> --view-url "view://<view-id>" --input -
+  ncli beads push --dry-run --input - --json
 ```
 
 `push` is idempotent on `Beads ID`. v1 creates missing rows and updates existing rows, but does not delete, archive, or sync page body content.

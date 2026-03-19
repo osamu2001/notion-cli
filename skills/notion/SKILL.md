@@ -32,7 +32,7 @@ Almost every workflow follows these three steps:
 
 1. **Search** — `ncli search "<query>" --json` to find pages/databases
 2. **Fetch** — `ncli fetch <id> --json` to get details and extract IDs
-3. **Act** — Use the extracted IDs to create/update/query
+3. **Act** — Use the extracted IDs to create/update, and query only when the connected live MCP supports it
 
 ### ID Types
 
@@ -41,7 +41,7 @@ Almost every workflow follows these three steps:
 | page_id | `abc123-def456` | Target for page operations, parent for page create |
 | database_id | `abc123-def456` | Required for view create |
 | data_source_id | `collection://ds-xxx` | Parent for adding pages to DB, view create, db update |
-| view_url | `view://view-xxx` or `https://...?v=xxx` | Target for db query |
+| view_url | `view://view-xxx` or `https://...?v=xxx` | Target for db query when query support is available |
 
 `ncli fetch <db-id>` response contains `data_source_id` and `view_url`.
 See `references/id-patterns.md` for detailed extraction patterns.
@@ -61,8 +61,8 @@ See `references/id-patterns.md` for detailed extraction patterns.
 | `ncli search "<query>"` | Search pages/databases |
 | `ncli fetch <url-or-id>` | Get page/database content |
 | `ncli beads status --database-id <db-id>` | Check beads DB wiring and schema readiness |
-| `ncli beads pull --view-url <view-url>` | Normalize a dedicated beads view into issue JSON |
-| `ncli beads push --database-id <db-id> --view-url <view-url> --input <path|->` | Create/update dedicated beads DB rows |
+| `ncli beads pull` | Pull locally managed Beads pages into issue JSON |
+| `ncli beads push --input <path|->` | Create/update locally managed dedicated beads DB pages |
 
 ### Page Operations
 | Command | Description |
@@ -78,7 +78,7 @@ See `references/id-patterns.md` for detailed extraction patterns.
 |---|---|
 | `nclidb create --title "T" --parent <page-id> --prop "Name:title" --prop "Status:select=A,B"` | Create database |
 | `nclidb update <ds-id> --statements 'ADD COLUMN "Col" TYPE'` | Alter schema |
-| `nclidb query "<view-url>"` | Query database (view URL required) |
+| `nclidb query "<view-url>"` | Query database when the connected live MCP exposes query support |
 
 ### Views, Comments & More
 | Command | Description |
@@ -151,7 +151,7 @@ ncli view create --data '{"database_id":"<db-id>","data_source_id":"collection:/
 # Step 3: Add tasks
 ncli page create --parent collection://<ds-id> --title "Implement feature" --prop "Status=Todo" --prop "Priority=High"
 
-# Step 4: Query (view URL required)
+# Step 4: Query when supported (view URL required)
 ncli db query "<view-url>"
 ```
 
@@ -164,7 +164,7 @@ ncli search "weekly review" --json
 # Get page content
 ncli fetch <page-id> --json
 
-# List database entries
+# List database entries when live MCP query support is available
 ncli db query "<view-url>" --json
 
 # Check comments
@@ -188,15 +188,18 @@ Optional properties:
 - `Labels`
 
 ```bash
-# 1. Verify the database and view
-ncli beads status --database-id <db-id> --view-url "view://<view-id>" --json
+# 1. Initialize and save Beads config
+ncli beads init --parent <page-id> --json
 
-# 2. Pull normalized issues
-ncli beads pull --view-url "view://<view-id>" --json
+# 2. Verify the database wiring and schema
+ncli beads status --json
 
-# 3. Push issue JSON (match by "Beads ID")
+# 3. Pull locally managed issues
+ncli beads pull --json
+
+# 4. Push issue JSON (match by "Beads ID")
 echo '{"issues":[{"id":"bd-1","title":"Fix login","status":"open"}]}' | \
-  ncli beads push --database-id <db-id> --view-url "view://<view-id>" --input -
+  ncli beads push --dry-run --input - --json
 ```
 
 ### 5. Organize Content
@@ -222,6 +225,7 @@ ncli page duplicate <page-id>
 2. **`db query` requires a view URL** (not a DB URL/ID)
    - Check `ncli fetch <db-id>` for existing view URLs
    - If none exist, create one with `ncli view create`
+   - Current live MCP servers may omit `notion-query-database-view`; in that case `ncli db query` is unavailable and `ncli fetch <db-id>` is the fallback
 
 3. **`view create` requires both `database_id` AND `data_source_id`**
    - Get both from `ncli fetch <db-id>`

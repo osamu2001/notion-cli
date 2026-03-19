@@ -48,9 +48,10 @@ ncli page create --parent collection://<ds-id> \
   --title "タスク1" --prop "Status=Open"
 
 # Beads ワークフロー
-ncli beads status --database-id <db-id> --view-url "view://<view-id>"
-ncli beads pull --view-url "view://<view-id>"
-ncli beads push --database-id <db-id> --view-url "view://<view-id>" --input issues.json
+ncli beads init --parent <page-id>
+ncli beads status
+ncli beads pull
+ncli beads push --dry-run --input issues.json
 ```
 
 ## コマンド一覧
@@ -63,15 +64,15 @@ ncli beads push --database-id <db-id> --view-url "view://<view-id>" --input issu
 | `ncli search <query>` | ワークスペース内のページ・DB・ユーザーを検索 |
 | `ncli fetch <url-or-id>` | URL または ID でページ・DB・データソースを取得 |
 | `ncli beads status` | 認証、DB 接続、beads schema の準備状態を確認 |
-| `ncli beads pull` | 専用 Notion beads view を beads 向け issue JSON に正規化 |
-| `ncli beads push` | beads issue JSON から Notion 行を作成・更新 |
+| `ncli beads pull` | ローカルで管理している Beads ページを issue JSON に pull |
+| `ncli beads push` | beads issue JSON からローカル管理下の Notion ページを作成・更新 |
 | `ncli page create` | ページを作成（`--title`, `--parent`, `--prop`, `--body`） |
 | `ncli page update <id>` | ページのプロパティまたはコンテンツを更新 |
 | `ncli page move <id...> --to <parent>` | ページを別の親に移動 |
 | `ncli page duplicate <id>` | ページを複製 |
 | `ncli db create` | データベースを作成（`--title`, `--parent`, `--prop`, `--schema`） |
 | `ncli db update <id>` | データベースのスキーマ・メタデータを更新 |
-| `ncli db query <view-url>` | データベースビューをクエリ |
+| `ncli db query <view-url>` | 接続先 live MCP が query capability を持つ場合にデータベースビューをクエリ |
 | `ncli view create` | データベースビューを作成（`--data` で指定） |
 | `ncli view update` | データベースビューを更新（`--data` で指定） |
 | `ncli comment create <id>` | ページにコメントを追加 |
@@ -105,9 +106,12 @@ ncli db create --title "タスク管理" --parent <page-id> \
 ncli page create --parent collection://<ds-id> \
   --title "タスク1" --prop "Status=Open"
 
-# ビューを作成してクエリ
+# ビューを作成し、live MCP が対応していればクエリ
 ncli view create --data '{"database_id":"<db-id>","data_source_id":"collection://<ds-id>","type":"table","name":"全件"}'
 ncli db query "https://www.notion.so/<db-id>?v=<view-id>"
+
+# query 非対応の live MCP では schema/view メタデータだけ取得
+ncli fetch <db-id>
 ```
 
 ### 専用 Beads DB を同期する
@@ -129,15 +133,18 @@ ncli db query "https://www.notion.so/<db-id>?v=<view-id>"
 - `Labels`
 
 ```bash
-# 接続と schema を確認
-ncli beads status --database-id <db-id> --view-url "view://<view-id>" --json
+# 専用 Beads DB を初期化して config を保存
+ncli beads init --parent <page-id> --json
 
-# 正規化された issue JSON を pull
-ncli beads pull --view-url "view://<view-id>" --json
+# 接続と schema を確認
+ncli beads status --json
+
+# ローカル管理中の issue JSON を pull
+ncli beads pull --json
 
 # issue JSON を Notion に push ("Beads ID" でマッチ)
 echo '{"issues":[{"id":"bd-1","title":"Fix login","status":"open"}]}' | \
-  ncli beads push --database-id <db-id> --view-url "view://<view-id>" --input -
+  ncli beads push --dry-run --input - --json
 ```
 
 `push` は `Beads ID` をキーに冪等に create/update します。v1 では delete/archive や page body 同期は行いません。
