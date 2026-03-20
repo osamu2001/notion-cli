@@ -19,6 +19,7 @@ import {
 	createBeadsPagesForPush,
 	detectBeadsArchiveSupport,
 	registerBeadsCommands,
+	storedConfigForResolvedTarget,
 	summarizeBeadsStateDoctorEntries,
 } from "./beads.js";
 
@@ -70,6 +71,45 @@ describe("buildBeadsInitViewCall", () => {
 				name: "All Issues",
 			},
 		});
+	});
+});
+
+describe("storedConfigForResolvedTarget", () => {
+	const config = {
+		database_id: "db-a",
+		data_source_id: "ds-a",
+		view_url: "view://a",
+		schema_version: "2026-03-18",
+	};
+
+	it("keeps saved config for config-backed targets", () => {
+		expect(
+			storedConfigForResolvedTarget({
+				databaseId: "db-a",
+				config,
+				source: "config",
+			}),
+		).toEqual(config);
+	});
+
+	it("ignores saved config when flags target a different database", () => {
+		expect(
+			storedConfigForResolvedTarget({
+				databaseId: "db-b",
+				config,
+				source: "flags",
+			}),
+		).toBeUndefined();
+	});
+
+	it("keeps saved config when flags still point at the saved database", () => {
+		expect(
+			storedConfigForResolvedTarget({
+				databaseId: "db-a",
+				config,
+				source: "flags",
+			}),
+		).toEqual(config);
 	});
 });
 

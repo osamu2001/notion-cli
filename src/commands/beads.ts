@@ -375,6 +375,18 @@ function buildStoredConfig(
 	};
 }
 
+export function storedConfigForResolvedTarget(
+	target: Pick<ResolvedBeadsTarget, "databaseId" | "config" | "source">,
+): StoredBeadsConfig | undefined {
+	if (!target.config) {
+		return undefined;
+	}
+	if (target.source === "config") {
+		return target.config;
+	}
+	return target.config.database_id === target.databaseId ? target.config : undefined;
+}
+
 function validateStoredConfigMatch(
 	config: StoredBeadsConfig | undefined,
 	dataSourceId: string | null,
@@ -1051,7 +1063,10 @@ async function runBeadsStatus(opts: BeadsStatusOptions, cmd: Command): Promise<v
 		>;
 		const fetchText = extractResultText(fetchResult, "beads fetch");
 		const databaseInfo = extractBeadsDatabaseInfoFromText(fetchText);
-		validateStoredConfigMatch(target.config, databaseInfo.data_source_id);
+		validateStoredConfigMatch(
+			storedConfigForResolvedTarget(target),
+			databaseInfo.data_source_id,
+		);
 
 		const schema = assessBeadsSchema(detectBeadsPropertiesFromFetchText(fetchText), true);
 		const viewUrl = target.viewUrl ?? null;
@@ -1190,7 +1205,10 @@ async function runBeadsPush(opts: BeadsPushOptions, cmd: Command): Promise<void>
 				'Run "ncli fetch <db-id> --raw" and check that the target is a database page',
 			);
 		}
-		validateStoredConfigMatch(target.config, databaseInfo.data_source_id);
+		validateStoredConfigMatch(
+			storedConfigForResolvedTarget(target),
+			databaseInfo.data_source_id,
+		);
 
 		const schema = assessBeadsSchema(detectBeadsPropertiesFromFetchText(fetchText), true);
 		if (schema.missing.length > 0) {
