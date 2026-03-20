@@ -4,6 +4,7 @@ import {
 	BEADS_DEFAULT_DATABASE_TITLE,
 	buildBeadsDatabaseSchema,
 	buildBeadsProperties,
+	buildBeadsUpdateProperties,
 	detectBeadsPropertiesFromQueryPayload,
 	extractBeadsDatabaseInfoFromText,
 	extractBeadsPageBodyFromText,
@@ -353,5 +354,32 @@ describe("buildBeadsProperties", () => {
 				comments: [],
 			}),
 		).toThrow("Invalid beads status");
+	});
+});
+
+describe("buildBeadsUpdateProperties", () => {
+	it("sends explicit clears for removed optional properties", () => {
+		expect(
+			buildBeadsUpdateProperties({
+				id: "bd-8",
+				title: "Ship it",
+				description: null,
+				body: null,
+				status: "open",
+				priority: null,
+				type: null,
+				issue_type: null,
+				assignee: null,
+				labels: [],
+				comments: [],
+			}),
+		).toEqual({
+			title: "Ship it",
+			"Beads ID": "bd-8",
+			Status: "Open",
+			Description: null,
+			Assignee: null,
+			Labels: [],
+		});
 	});
 });

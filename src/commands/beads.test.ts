@@ -161,6 +161,9 @@ describe("buildBeadsUpdateCall", () => {
 					"Beads ID": "bd-1",
 					Priority: "High",
 					Type: "Bug",
+					Description: null,
+					Assignee: null,
+					Labels: [],
 				},
 			},
 		});

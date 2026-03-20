@@ -12,6 +12,7 @@ import {
 	BEADS_SCHEMA_VERSION,
 	buildBeadsDatabaseSchema,
 	buildBeadsProperties,
+	buildBeadsUpdateProperties,
 	detectBeadsPropertiesFromFetchText,
 	extractBeadsDatabaseInfoFromText,
 	extractPageIdFromUrl,
@@ -320,7 +321,7 @@ export function buildBeadsUpdateCall(pageId: string, issue: BeadsPushIssue): Too
 		args: {
 			page_id: pageId,
 			command: "update_properties",
-			properties: buildBeadsProperties(issue),
+			properties: buildBeadsUpdateProperties(issue),
 		},
 	};
 }

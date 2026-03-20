@@ -741,6 +741,14 @@ export function buildBeadsProperties(issue: BeadsPushIssue): JsonRecord {
 	return properties;
 }
 
+export function buildBeadsUpdateProperties(issue: BeadsPushIssue): JsonRecord {
+	const properties = buildBeadsProperties(issue);
+	properties.Description = issue.description;
+	properties.Assignee = issue.assignee;
+	properties.Labels = issue.labels;
+	return properties;
+}
+
 export function extractSelfUserFromPayload(payload: JsonRecord): BeadsAuthUser | null {
 	const candidate =
 		Array.isArray(payload.results) && payload.results.length > 0 ? payload.results[0] : payload;
