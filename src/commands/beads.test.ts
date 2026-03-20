@@ -6,6 +6,7 @@ import { Command } from "commander";
 import { describe, expect, it } from "vitest";
 import { BeadsConfigStore } from "../util/beads-config.js";
 import { BeadsStateStore } from "../util/beads-state.js";
+import { CliError } from "../util/errors.js";
 import {
 	buildBeadsAuthCall,
 	buildBeadsBodyUpdateCall,
@@ -587,6 +588,127 @@ describe("collectExistingBeadsPagesForPush", () => {
 				"https://www.notion.so/workspace/beads-db",
 			),
 		).rejects.toThrow("Duplicate live Beads ID rows detected");
+	});
+
+	it("marks live search fetch failures as ambiguous remote matches instead of throwing", async () => {
+		const conn = {
+			callTool: async (name: string, _args: Record<string, unknown>) => {
+				if (name === "notion-search") {
+					return {
+						results: [{ id: "11111111-1111-4111-8111-111111111111", type: "page" }],
+					};
+				}
+				if (name === "notion-fetch") {
+					throw new CliError(
+						"Invalid target row",
+						"candidate page body was missing properties",
+						'Retry with "ncli fetch <page-id> --raw" to inspect the raw payload',
+					);
+				}
+				throw new Error(`unexpected tool: ${name}`);
+			},
+		};
+
+		const result = await collectExistingBeadsPagesForPush(
+			conn,
+			{ database_id: "db-1", page_ids: {} },
+			[
+				{
+					id: "bd-1",
+					title: "Issue bd-1",
+					description: null,
+					body: null,
+					status: "open",
+					priority: null,
+					type: null,
+					issue_type: null,
+					assignee: null,
+					labels: [],
+					comments: [],
+				},
+			],
+			"ds-1",
+		);
+
+		expect(result.existingById.size).toBe(0);
+		expect(result.discoveredPageIds).toEqual({});
+		expect(result.blockedIssues).toEqual([
+			{
+				id: "bd-1",
+				notion_page_id: "11111111-1111-4111-8111-111111111111",
+				stage: "search_fetch",
+				reason: "ambiguous_remote_match",
+				message: expect.stringContaining(
+					"candidate page 11111111-1111-4111-8111-111111111111 could not be normalized during beads push preflight: Invalid target row: candidate page body was missing properties",
+				),
+			},
+		]);
+		expect(result.errors).toEqual([
+			{
+				id: "bd-1",
+				stage: "search_fetch",
+				message: expect.stringContaining("candidate page 11111111-1111-4111-8111-111111111111"),
+			},
+		]);
+	});
+
+	it("marks saved-state fetch failures as ambiguous remote matches instead of throwing", async () => {
+		const conn = {
+			callTool: async (name: string, args: Record<string, unknown>) => {
+				if (name === "notion-fetch" && args.id === "11111111-1111-4111-8111-111111111111") {
+					throw new CliError(
+						"Invalid target row",
+						"saved page body was missing properties",
+						'Retry with "ncli fetch <page-id> --raw" to inspect the raw payload',
+					);
+				}
+				throw new Error(`unexpected tool: ${name}`);
+			},
+		};
+
+		const result = await collectExistingBeadsPagesForPush(
+			conn,
+			{
+				database_id: "db-1",
+				page_ids: { "bd-1": "11111111-1111-4111-8111-111111111111" },
+			},
+			[
+				{
+					id: "bd-1",
+					title: "Issue bd-1",
+					description: null,
+					body: null,
+					status: "open",
+					priority: null,
+					type: null,
+					issue_type: null,
+					assignee: null,
+					labels: [],
+					comments: [],
+				},
+			],
+			"ds-1",
+		);
+
+		expect(result.existingById.size).toBe(0);
+		expect(result.blockedIssues).toEqual([
+			{
+				id: "bd-1",
+				notion_page_id: "11111111-1111-4111-8111-111111111111",
+				stage: "state_fetch",
+				reason: "ambiguous_remote_match",
+				message: expect.stringContaining(
+					"saved page 11111111-1111-4111-8111-111111111111 could not be normalized during beads push preflight: Invalid target row: saved page body was missing properties",
+				),
+			},
+		]);
+		expect(result.errors).toEqual([
+			{
+				id: "bd-1",
+				stage: "state_fetch",
+				message: expect.stringContaining("saved page 11111111-1111-4111-8111-111111111111"),
+			},
+		]);
 	});
 });
 

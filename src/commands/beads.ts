@@ -113,10 +113,20 @@ interface RawExistingBeadsPage {
 	search?: Record<string, unknown>;
 }
 
+interface BlockedBeadsPushIssue {
+	id: string;
+	notion_page_id: string | null;
+	stage: "state_fetch" | "search_fetch";
+	reason: "ambiguous_remote_match";
+	message: string;
+}
+
 interface ExistingBeadsPagesForPush {
 	existingById: Map<string, BeadsIssue>;
 	rawExistingPages: RawExistingBeadsPage[];
 	discoveredPageIds: Record<string, string>;
+	blockedIssues: BlockedBeadsPushIssue[];
+	errors: Array<{ id: string; stage: string; message: string }>;
 }
 
 interface PlannedBeadsCommentCreate {
@@ -658,6 +668,36 @@ async function fetchExistingBeadsIssueForPush(
 	};
 }
 
+function summarizeBeadsPushPreflightError(error: unknown): string {
+	if (error instanceof CliError) {
+		const parts = [`${error.what}: ${error.why}`];
+		if (error.hint) {
+			parts.push(`Hint: ${error.hint}`);
+		}
+		return parts.join(" ");
+	}
+	if (error instanceof Error) {
+		return error.message;
+	}
+	return String(error);
+}
+
+function buildBlockedBeadsPushIssue(
+	id: string,
+	pageId: string,
+	stage: "state_fetch" | "search_fetch",
+	pageLabel: string,
+	error: unknown,
+): BlockedBeadsPushIssue {
+	return {
+		id,
+		notion_page_id: pageId,
+		stage,
+		reason: "ambiguous_remote_match",
+		message: `${pageLabel} ${pageId} could not be normalized during beads push preflight: ${summarizeBeadsPushPreflightError(error)}`,
+	};
+}
+
 export async function collectExistingBeadsPagesForPush(
 	conn: ToolCaller,
 	state: StoredBeadsState,
@@ -667,13 +707,25 @@ export async function collectExistingBeadsPagesForPush(
 	const existingById = new Map<string, BeadsIssue>();
 	const rawExistingPages: RawExistingBeadsPage[] = [];
 	const discoveredPageIds: Record<string, string> = {};
+	const blockedIssuesById = new Map<string, BlockedBeadsPushIssue>();
 
 	for (const [expectedBeadsId, pageId] of Object.entries(state.page_ids)) {
-		const existingPage = await fetchExistingBeadsIssueForPush(
-			conn,
-			pageId,
-			`beads push preflight page ${expectedBeadsId}`,
-		);
+		let existingPage: { issue: BeadsIssue; fetch: Record<string, unknown> };
+		try {
+			existingPage = await fetchExistingBeadsIssueForPush(
+				conn,
+				pageId,
+				`beads push preflight page ${expectedBeadsId}`,
+			);
+		} catch (error) {
+			if (!blockedIssuesById.has(expectedBeadsId)) {
+				blockedIssuesById.set(
+					expectedBeadsId,
+					buildBlockedBeadsPushIssue(expectedBeadsId, pageId, "state_fetch", "saved page", error),
+				);
+			}
+			continue;
+		}
 		if (existingPage.issue.id !== expectedBeadsId) {
 			throw new CliError(
 				"Managed page ID drift detected",
@@ -691,7 +743,7 @@ export async function collectExistingBeadsPagesForPush(
 	}
 
 	for (const inputIssue of inputIssues) {
-		if (existingById.has(inputIssue.id)) {
+		if (existingById.has(inputIssue.id) || blockedIssuesById.has(inputIssue.id)) {
 			continue;
 		}
 		const searchCall = buildBeadsSearchCall(inputIssue.id, dataSourceId);
@@ -702,15 +754,35 @@ export async function collectExistingBeadsPagesForPush(
 		const searchPayload = extractResultJson(searchResult, `beads push search ${inputIssue.id}`);
 		const searchMatches: Array<{ issue: BeadsIssue; fetch: Record<string, unknown> }> = [];
 		for (const pageId of extractSearchResultPageIds(searchPayload)) {
-			const match = await fetchExistingBeadsIssueForPush(
-				conn,
-				pageId,
-				`beads push live match ${inputIssue.id}`,
-			);
+			let match: { issue: BeadsIssue; fetch: Record<string, unknown> };
+			try {
+				match = await fetchExistingBeadsIssueForPush(
+					conn,
+					pageId,
+					`beads push live match ${inputIssue.id}`,
+				);
+			} catch (error) {
+				if (!blockedIssuesById.has(inputIssue.id)) {
+					blockedIssuesById.set(
+						inputIssue.id,
+						buildBlockedBeadsPushIssue(
+							inputIssue.id,
+							pageId,
+							"search_fetch",
+							"candidate page",
+							error,
+						),
+					);
+				}
+				break;
+			}
 			if (match.issue.id !== inputIssue.id) {
 				continue;
 			}
 			searchMatches.push(match);
+		}
+		if (blockedIssuesById.has(inputIssue.id)) {
+			continue;
 		}
 		if (searchMatches.length > 1) {
 			throw new CliError(
@@ -742,6 +814,12 @@ export async function collectExistingBeadsPagesForPush(
 		existingById,
 		rawExistingPages,
 		discoveredPageIds,
+		blockedIssues: [...blockedIssuesById.values()],
+		errors: [...blockedIssuesById.values()].map(({ id, stage, message }) => ({
+			id,
+			stage,
+			message,
+		})),
 	};
 }
 
@@ -1283,6 +1361,9 @@ async function runBeadsPush(opts: BeadsPushOptions, cmd: Command): Promise<void>
 			databaseInfo.data_source_id,
 		);
 		const existingById = existingPages.existingById;
+		const blockedIssuesById = new Map(
+			existingPages.blockedIssues.map((issue) => [issue.id, issue]),
+		);
 		const existingCommentsById = new Map<string, BeadsIssueComment[]>();
 		const rawExistingPages = existingPages.rawExistingPages;
 		const rawExistingComments: Array<{
@@ -1338,6 +1419,16 @@ async function runBeadsPush(opts: BeadsPushOptions, cmd: Command): Promise<void>
 
 		for (const issue of input.issues) {
 			buildBeadsProperties(issue);
+			const blocked = blockedIssuesById.get(issue.id);
+			if (blocked) {
+				skipped.push({
+					id: issue.id,
+					title: issue.title,
+					notion_page_id: blocked.notion_page_id,
+					reason: blocked.reason,
+				});
+				continue;
+			}
 			const current = existingById.get(issue.id);
 			if (!current) {
 				toCreate.push(issue);
@@ -1409,7 +1500,7 @@ async function runBeadsPush(opts: BeadsPushOptions, cmd: Command): Promise<void>
 			),
 			archived_count: toArchive.length,
 			skipped_count: skipped.length,
-			errors: [] as string[],
+			errors: existingPages.errors,
 			created: toCreate.map((issue) => ({
 				id: issue.id,
 				title: issue.title,
