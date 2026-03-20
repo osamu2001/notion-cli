@@ -8,8 +8,10 @@ import {
 	buildBeadsInitDbCall,
 	buildBeadsInitViewCall,
 	buildBeadsPullCall,
+	buildBeadsSearchCall,
 	buildBeadsStateDoctorEntry,
 	buildBeadsUpdateCall,
+	collectExistingBeadsPagesForPush,
 	detectBeadsArchiveSupport,
 	registerBeadsCommands,
 	summarizeBeadsStateDoctorEntries,
@@ -98,6 +100,31 @@ describe("buildBeadsCreateCall", () => {
 						content: "Body text",
 					},
 				],
+			},
+		});
+	});
+});
+
+describe("buildBeadsSearchCall", () => {
+	it("scopes live row discovery to the target database when a URL is available", () => {
+		expect(buildBeadsSearchCall("bd-1", "https://www.notion.so/workspace/beads-db")).toEqual({
+			tool: "notion-search",
+			args: {
+				query: "bd-1",
+				page_size: 25,
+				query_type: "internal",
+				data_source_url: "https://www.notion.so/workspace/beads-db",
+			},
+		});
+	});
+
+	it("falls back to unscoped search when the database URL is unavailable", () => {
+		expect(buildBeadsSearchCall("bd-1", null)).toEqual({
+			tool: "notion-search",
+			args: {
+				query: "bd-1",
+				page_size: 25,
+				query_type: "internal",
 			},
 		});
 	});
@@ -278,6 +305,124 @@ describe("detectBeadsArchiveSupport", () => {
 			reason: null,
 			supported_commands: ["update_properties", "archive"],
 		});
+	});
+});
+
+describe("collectExistingBeadsPagesForPush", () => {
+	const makeIssueFetch = (beadsId: string, pageId: string) => ({
+		text: `<properties>${JSON.stringify({
+			Name: `Issue ${beadsId}`,
+			"Beads ID": beadsId,
+			Status: "Open",
+			url: `https://www.notion.so/${pageId.replaceAll("-", "")}`,
+		})}</properties>\n<blank-page />`,
+	});
+
+	it("discovers existing rows from live search when local state is empty", async () => {
+		const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+		const conn = {
+			callTool: async (name: string, args: Record<string, unknown>) => {
+				calls.push({ name, args });
+				if (name === "notion-search") {
+					return {
+						results: [{ id: "11111111-1111-4111-8111-111111111111", type: "page" }],
+					};
+				}
+				if (name === "notion-fetch") {
+					return makeIssueFetch("bd-1", "11111111-1111-4111-8111-111111111111");
+				}
+				throw new Error(`unexpected tool: ${name}`);
+			},
+		};
+
+		const result = await collectExistingBeadsPagesForPush(
+			conn,
+			{ database_id: "db-1", page_ids: {} },
+			[
+				{
+					id: "bd-1",
+					title: "Issue bd-1",
+					description: null,
+					body: null,
+					status: "open",
+					priority: null,
+					type: null,
+					issue_type: null,
+					assignee: null,
+					labels: [],
+					comments: [],
+				},
+			],
+			"https://www.notion.so/workspace/beads-db",
+		);
+
+		expect(result.existingById.get("bd-1")?.notion_page_id).toBe(
+			"11111111-1111-4111-8111-111111111111",
+		);
+		expect(result.discoveredPageIds).toEqual({
+			"bd-1": "11111111-1111-4111-8111-111111111111",
+		});
+		expect(result.rawExistingPages).toMatchObject([
+			{
+				beads_id: "bd-1",
+				page_id: "11111111-1111-4111-8111-111111111111",
+				source: "search",
+			},
+		]);
+		expect(calls).toContainEqual({
+			name: "notion-search",
+			args: {
+				query: "bd-1",
+				page_size: 25,
+				query_type: "internal",
+				data_source_url: "https://www.notion.so/workspace/beads-db",
+			},
+		});
+	});
+
+	it("fails when live search finds multiple exact Beads ID matches", async () => {
+		const conn = {
+			callTool: async (name: string, args: Record<string, unknown>) => {
+				if (name === "notion-search") {
+					return {
+						results: [
+							{ id: "11111111-1111-4111-8111-111111111111", type: "page" },
+							{ id: "22222222-2222-4222-8222-222222222222", type: "page" },
+						],
+					};
+				}
+				if (name === "notion-fetch" && args.id === "11111111-1111-4111-8111-111111111111") {
+					return makeIssueFetch("bd-1", "11111111-1111-4111-8111-111111111111");
+				}
+				if (name === "notion-fetch" && args.id === "22222222-2222-4222-8222-222222222222") {
+					return makeIssueFetch("bd-1", "22222222-2222-4222-8222-222222222222");
+				}
+				throw new Error(`unexpected tool: ${name}`);
+			},
+		};
+
+		await expect(
+			collectExistingBeadsPagesForPush(
+				conn,
+				{ database_id: "db-1", page_ids: {} },
+				[
+					{
+						id: "bd-1",
+						title: "Issue bd-1",
+						description: null,
+						body: null,
+						status: "open",
+						priority: null,
+						type: null,
+						issue_type: null,
+						assignee: null,
+						labels: [],
+						comments: [],
+					},
+				],
+				"https://www.notion.so/workspace/beads-db",
+			),
+		).rejects.toThrow("Duplicate live Beads ID rows detected");
 	});
 });
 

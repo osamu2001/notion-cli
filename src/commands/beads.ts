@@ -14,6 +14,7 @@ import {
 	buildBeadsProperties,
 	detectBeadsPropertiesFromFetchText,
 	extractBeadsDatabaseInfoFromText,
+	extractPageIdFromUrl,
 	extractResultJson,
 	extractResultText,
 	extractSelfUserFromPayload,
@@ -96,6 +97,24 @@ export interface BeadsArchiveSupport {
 interface ToolCall {
 	tool: string;
 	args: Record<string, unknown>;
+}
+
+interface ToolCaller {
+	callTool(name: string, args: Record<string, unknown>): Promise<unknown>;
+}
+
+interface RawExistingBeadsPage {
+	beads_id: string;
+	page_id: string;
+	fetch: Record<string, unknown>;
+	source: "state" | "search";
+	search?: Record<string, unknown>;
+}
+
+interface ExistingBeadsPagesForPush {
+	existingById: Map<string, BeadsIssue>;
+	rawExistingPages: RawExistingBeadsPage[];
+	discoveredPageIds: Record<string, string>;
 }
 
 interface ResolvedBeadsTarget {
@@ -272,6 +291,18 @@ export function buildBeadsCreateCall(dataSourceId: string, issues: BeadsPushIssu
 				properties: buildBeadsProperties(issue),
 				...(issue.body ? { content: issue.body } : {}),
 			})),
+		},
+	};
+}
+
+export function buildBeadsSearchCall(query: string, databaseUrl: string | null): ToolCall {
+	return {
+		tool: "notion-search",
+		args: {
+			query,
+			page_size: 25,
+			query_type: "internal",
+			...(databaseUrl ? { data_source_url: databaseUrl } : {}),
 		},
 	};
 }
@@ -502,8 +533,160 @@ function buildBeadsArchiveCall(pageId: string, archiveSupport: BeadsArchiveSuppo
 	);
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function extractSearchResultPageIds(payload: Record<string, unknown>): string[] {
+	const results = Array.isArray(payload.results) ? payload.results : [];
+	const pageIds: string[] = [];
+	const seen = new Set<string>();
+
+	for (const result of results) {
+		if (!isRecord(result)) {
+			continue;
+		}
+		const type = typeof result.type === "string" ? result.type : null;
+		if (type && type !== "page") {
+			continue;
+		}
+		const directId =
+			typeof result.id === "string"
+				? result.id
+				: typeof result.page_id === "string"
+					? result.page_id
+					: null;
+		const urlId =
+			typeof result.url === "string"
+				? extractPageIdFromUrl(result.url)
+				: typeof result.page_url === "string"
+					? extractPageIdFromUrl(result.page_url)
+					: null;
+		const pageId = directId ?? urlId;
+		if (!pageId || seen.has(pageId)) {
+			continue;
+		}
+		seen.add(pageId);
+		pageIds.push(pageId);
+	}
+
+	return pageIds;
+}
+
+async function fetchExistingBeadsIssueForPush(
+	conn: ToolCaller,
+	pageId: string,
+	context: string,
+): Promise<{ issue: BeadsIssue; fetch: Record<string, unknown> }> {
+	const pageFetchCall = { tool: "notion-fetch", args: { id: pageId } };
+	const pageFetchResult = (await conn.callTool(pageFetchCall.tool, pageFetchCall.args)) as Record<
+		string,
+		unknown
+	>;
+	const pagePayload = extractResultJson(pageFetchResult, context);
+	const existingIssue = normalizeBeadsPageFetchPayload(pagePayload);
+	if (!existingIssue.notion_page_id) {
+		throw new CliError(
+			"Invalid target row",
+			`${context} does not expose a page id after fetch`,
+			'Retry with "ncli fetch <page-id> --raw" to inspect the raw payload',
+		);
+	}
+	return {
+		issue: existingIssue,
+		fetch: pageFetchResult,
+	};
+}
+
+export async function collectExistingBeadsPagesForPush(
+	conn: ToolCaller,
+	state: StoredBeadsState,
+	inputIssues: BeadsPushIssue[],
+	databaseUrl: string | null,
+): Promise<ExistingBeadsPagesForPush> {
+	const existingById = new Map<string, BeadsIssue>();
+	const rawExistingPages: RawExistingBeadsPage[] = [];
+	const discoveredPageIds: Record<string, string> = {};
+
+	for (const [expectedBeadsId, pageId] of Object.entries(state.page_ids)) {
+		const existingPage = await fetchExistingBeadsIssueForPush(
+			conn,
+			pageId,
+			`beads push preflight page ${expectedBeadsId}`,
+		);
+		if (existingPage.issue.id !== expectedBeadsId) {
+			throw new CliError(
+				"Managed page ID drift detected",
+				`Saved mapping expected Beads ID ${expectedBeadsId}, but Notion page ${pageId} currently reports ${existingPage.issue.id}`,
+				"Fix the page property in Notion or clear the saved beads state before retrying",
+			);
+		}
+		existingById.set(existingPage.issue.id, existingPage.issue);
+		rawExistingPages.push({
+			beads_id: expectedBeadsId,
+			page_id: pageId,
+			fetch: existingPage.fetch,
+			source: "state",
+		});
+	}
+
+	for (const inputIssue of inputIssues) {
+		if (existingById.has(inputIssue.id)) {
+			continue;
+		}
+		const searchCall = buildBeadsSearchCall(inputIssue.id, databaseUrl);
+		const searchResult = (await conn.callTool(searchCall.tool, searchCall.args)) as Record<
+			string,
+			unknown
+		>;
+		const searchPayload = extractResultJson(searchResult, `beads push search ${inputIssue.id}`);
+		const searchMatches: Array<{ issue: BeadsIssue; fetch: Record<string, unknown> }> = [];
+		for (const pageId of extractSearchResultPageIds(searchPayload)) {
+			const match = await fetchExistingBeadsIssueForPush(
+				conn,
+				pageId,
+				`beads push live match ${inputIssue.id}`,
+			);
+			if (match.issue.id !== inputIssue.id) {
+				continue;
+			}
+			searchMatches.push(match);
+		}
+		if (searchMatches.length > 1) {
+			throw new CliError(
+				"Duplicate live Beads ID rows detected",
+				`Found multiple Notion pages for Beads ID ${inputIssue.id}: ${searchMatches
+					.map((match) => match.issue.notion_page_id)
+					.join(", ")}`,
+				"Merge or archive the duplicate rows in Notion, then rerun beads push",
+			);
+		}
+		const liveMatch = searchMatches[0];
+		if (!liveMatch) {
+			continue;
+		}
+		existingById.set(inputIssue.id, liveMatch.issue);
+		state.page_ids[inputIssue.id] = liveMatch.issue.notion_page_id ?? liveMatch.issue.external_ref;
+		discoveredPageIds[inputIssue.id] =
+			liveMatch.issue.notion_page_id ?? liveMatch.issue.external_ref;
+		rawExistingPages.push({
+			beads_id: inputIssue.id,
+			page_id: liveMatch.issue.notion_page_id ?? liveMatch.issue.external_ref,
+			fetch: liveMatch.fetch,
+			source: "search",
+			search: searchResult,
+		});
+	}
+
+	return {
+		existingById,
+		rawExistingPages,
+		discoveredPageIds,
+	};
+}
+
 async function collectBeadsStateDoctorData(
-	conn: { callTool(name: string, args: Record<string, unknown>): Promise<unknown> },
+	conn: ToolCaller,
 	state: StoredBeadsState,
 ): Promise<{
 	entries: BeadsStateDoctorEntry[];
@@ -991,47 +1174,20 @@ async function runBeadsPush(opts: BeadsPushOptions, cmd: Command): Promise<void>
 			database_id: target.databaseId,
 			page_ids: {},
 		};
-		const existingById = new Map<string, BeadsIssue>();
+		const existingPages = await collectExistingBeadsPagesForPush(
+			conn,
+			state,
+			input.issues,
+			databaseInfo.database_url,
+		);
+		const existingById = existingPages.existingById;
 		const existingCommentsById = new Map<string, BeadsIssueComment[]>();
-		const rawExistingPages: Array<{
-			beads_id: string;
-			page_id: string;
-			fetch: Record<string, unknown>;
-		}> = [];
+		const rawExistingPages = existingPages.rawExistingPages;
 		const rawExistingComments: Array<{
 			beads_id: string;
 			page_id: string;
 			comments: Record<string, unknown>;
 		}> = [];
-
-		for (const [expectedBeadsId, pageId] of Object.entries(state.page_ids)) {
-			const pageFetchCall = { tool: "notion-fetch", args: { id: pageId } };
-			const pageFetchResult = (await conn.callTool(
-				pageFetchCall.tool,
-				pageFetchCall.args,
-			)) as Record<string, unknown>;
-			const pagePayload = extractResultJson(
-				pageFetchResult,
-				`beads push preflight page ${expectedBeadsId}`,
-			);
-			const existingIssue = normalizeBeadsPageFetchPayload(pagePayload);
-			if (existingIssue.id !== expectedBeadsId) {
-				throw new CliError(
-					"Managed page ID drift detected",
-					`Saved mapping expected Beads ID ${expectedBeadsId}, but Notion page ${pageId} currently reports ${existingIssue.id}`,
-					"Fix the page property in Notion or clear the saved beads state before retrying",
-				);
-			}
-			if (!existingIssue.notion_page_id) {
-				throw new CliError(
-					"Invalid target row",
-					`Managed issue ${expectedBeadsId} does not expose a page id after fetch`,
-					'Retry with "ncli fetch <page-id> --raw" to inspect the raw payload',
-				);
-			}
-			existingById.set(existingIssue.id, existingIssue);
-			rawExistingPages.push({ beads_id: expectedBeadsId, page_id: pageId, fetch: pageFetchResult });
-		}
 		for (const issue of input.issues) {
 			const current = existingById.get(issue.id);
 			if (!current?.notion_page_id || issue.comments.length === 0) {
