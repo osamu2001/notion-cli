@@ -22,6 +22,7 @@ import {
 	detectBeadsArchiveSupport,
 	registerBeadsCommands,
 	saveBeadsConfigAndResetState,
+	statusConfigMetadataForTarget,
 	storedConfigForResolvedTarget,
 	summarizeBeadsStateDoctorEntries,
 } from "./beads.js";
@@ -113,6 +114,60 @@ describe("storedConfigForResolvedTarget", () => {
 				source: "flags",
 			}),
 		).toEqual(config);
+	});
+});
+
+describe("statusConfigMetadataForTarget", () => {
+	const config = {
+		database_id: "db-a",
+		data_source_id: "ds-a",
+		view_url: "view://a",
+		schema_version: "beads/v999",
+	};
+
+	it("reports configured for config-backed targets", () => {
+		expect(
+			statusConfigMetadataForTarget({
+				databaseId: "db-a",
+				config,
+				source: "config",
+			}),
+		).toMatchObject({
+			configured: true,
+			saved_config_present: true,
+			schema_version: "beads/v999",
+			effective_config: config,
+		});
+	});
+
+	it("keeps configured for same-database overrides", () => {
+		expect(
+			statusConfigMetadataForTarget({
+				databaseId: "db-a",
+				config,
+				source: "flags",
+			}),
+		).toMatchObject({
+			configured: true,
+			saved_config_present: true,
+			schema_version: "beads/v999",
+			effective_config: config,
+		});
+	});
+
+	it("clears configured for unrelated overrides while preserving file presence", () => {
+		expect(
+			statusConfigMetadataForTarget({
+				databaseId: "db-b",
+				config,
+				source: "flags",
+			}),
+		).toMatchObject({
+			configured: false,
+			saved_config_present: true,
+			schema_version: "beads/v1",
+			effective_config: undefined,
+		});
 	});
 });
 

@@ -387,6 +387,23 @@ export function storedConfigForResolvedTarget(
 	return target.config.database_id === target.databaseId ? target.config : undefined;
 }
 
+export function statusConfigMetadataForTarget(
+	target: Pick<ResolvedBeadsTarget, "databaseId" | "config" | "source">,
+): {
+	configured: boolean;
+	saved_config_present: boolean;
+	schema_version: string;
+	effective_config: StoredBeadsConfig | undefined;
+} {
+	const effectiveConfig = storedConfigForResolvedTarget(target);
+	return {
+		configured: !!effectiveConfig,
+		saved_config_present: !!target.config,
+		schema_version: effectiveConfig?.schema_version ?? BEADS_SCHEMA_VERSION,
+		effective_config: effectiveConfig,
+	};
+}
+
 function validateStoredConfigMatch(
 	config: StoredBeadsConfig | undefined,
 	dataSourceId: string | null,
@@ -1092,6 +1109,7 @@ async function runBeadsStatus(opts: BeadsStatusOptions, cmd: Command): Promise<v
 			? await collectBeadsStateDoctorData(conn, state)
 			: { entries: [], rawEntries: [] };
 		const doctorSummary = summarizeBeadsStateDoctorEntries(doctorEntries);
+		const configMetadata = statusConfigMetadataForTarget(target);
 
 		const payload = {
 			ready: !!databaseInfo.data_source_id && schema.missing.length === 0 && viewConfigured,
@@ -1106,8 +1124,9 @@ async function runBeadsStatus(opts: BeadsStatusOptions, cmd: Command): Promise<v
 			data_source_id: databaseInfo.data_source_id,
 			view_url: viewUrl,
 			views: databaseInfo.views,
-			schema_version: target.config?.schema_version ?? BEADS_SCHEMA_VERSION,
-			configured: !!target.config,
+			schema_version: configMetadata.schema_version,
+			configured: configMetadata.configured,
+			saved_config_present: configMetadata.saved_config_present,
 			config_source: target.source,
 			schema,
 			archive: archiveSupport,
