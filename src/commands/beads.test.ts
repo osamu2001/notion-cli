@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -20,6 +21,7 @@ import {
 	collectExistingBeadsPagesForPush,
 	createBeadsPagesForPush,
 	detectBeadsArchiveSupport,
+	hasBeadsConfigFile,
 	registerBeadsCommands,
 	saveBeadsConfigAndResetState,
 	statusConfigMetadataForTarget,
@@ -197,6 +199,30 @@ describe("saveBeadsConfigAndResetState", () => {
 				database_id: "db-new",
 				page_ids: {},
 			});
+		} finally {
+			await rm(tempDir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("hasBeadsConfigFile", () => {
+	it("returns true even when the saved config file is malformed", async () => {
+		const tempDir = await mkdtemp(path.join(os.tmpdir(), "ncli-beads-config-clear-"));
+		try {
+			const configStore = new BeadsConfigStore(tempDir);
+			fs.mkdirSync(tempDir, { recursive: true });
+			fs.writeFileSync(path.join(tempDir, "beads.json"), "{broken", "utf8");
+			expect(hasBeadsConfigFile(configStore)).toBe(true);
+		} finally {
+			await rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("returns false when no saved config file exists", async () => {
+		const tempDir = await mkdtemp(path.join(os.tmpdir(), "ncli-beads-config-clear-"));
+		try {
+			const configStore = new BeadsConfigStore(tempDir);
+			expect(hasBeadsConfigFile(configStore)).toBe(false);
 		} finally {
 			await rm(tempDir, { recursive: true, force: true });
 		}

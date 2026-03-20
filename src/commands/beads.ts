@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
@@ -433,6 +434,10 @@ export function saveBeadsConfigAndResetState(
 	const initialState = buildInitialBeadsState(savedConfig.database_id);
 	stateStore.save(initialState);
 	return initialState;
+}
+
+export function hasBeadsConfigFile(store: Pick<BeadsConfigStore, "filePath">): boolean {
+	return existsSync(store.filePath());
 }
 
 function readRequiredStoredState(command: string): {
@@ -1065,7 +1070,7 @@ function runBeadsConfigShow(cmd: Command): void {
 function runBeadsConfigClear(cmd: Command): void {
 	const store = new BeadsConfigStore();
 	const stateStore = new BeadsStateStore();
-	const existed = !!store.read();
+	const existed = hasBeadsConfigFile(store);
 	store.clear();
 	stateStore.clear();
 	printOutput(
