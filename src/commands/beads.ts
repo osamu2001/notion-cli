@@ -117,6 +117,13 @@ interface ExistingBeadsPagesForPush {
 	discoveredPageIds: Record<string, string>;
 }
 
+interface PlannedBeadsCommentCreate {
+	id: string;
+	title: string;
+	pageId: string | null;
+	comments: BeadsIssueComment[];
+}
+
 interface ResolvedBeadsTarget {
 	databaseId: string;
 	viewUrl?: string;
@@ -685,6 +692,45 @@ export async function collectExistingBeadsPagesForPush(
 	};
 }
 
+export async function createBeadsPagesForPush(
+	conn: ToolCaller,
+	stateStore: BeadsStateStore,
+	state: StoredBeadsState,
+	dataSourceId: string,
+	toCreate: BeadsPushIssue[],
+	toCreateComments: PlannedBeadsCommentCreate[] = [],
+): Promise<Record<string, unknown> | null> {
+	if (toCreate.length === 0) {
+		return null;
+	}
+
+	const createCall = buildBeadsCreateCall(dataSourceId, toCreate);
+	const createResult = (await conn.callTool(createCall.tool, createCall.args)) as Record<
+		string,
+		unknown
+	>;
+	const createPayload = extractResultJson(createResult, "beads push create");
+	const createdPages = Array.isArray(createPayload.pages) ? createPayload.pages : [];
+	for (const [index, issue] of toCreate.entries()) {
+		const page = createdPages[index];
+		if (
+			page &&
+			typeof page === "object" &&
+			page !== null &&
+			"id" in page &&
+			typeof page.id === "string"
+		) {
+			state.page_ids[issue.id] = page.id;
+			stateStore.save(state);
+			const plannedComments = toCreateComments.find((entry) => entry.id === issue.id);
+			if (plannedComments) {
+				plannedComments.pageId = page.id;
+			}
+		}
+	}
+	return createResult;
+}
+
 async function collectBeadsStateDoctorData(
 	conn: ToolCaller,
 	state: StoredBeadsState,
@@ -1215,12 +1261,7 @@ async function runBeadsPush(opts: BeadsPushOptions, cmd: Command): Promise<void>
 			pageId: string;
 			body: string | null;
 		}> = [];
-		const toCreateComments: Array<{
-			id: string;
-			title: string;
-			pageId: string | null;
-			comments: BeadsIssueComment[];
-		}> = [];
+		const toCreateComments: PlannedBeadsCommentCreate[] = [];
 		const inputIds = new Set(input.issues.map((issue) => issue.id));
 		const toArchive = opts.archiveMissing
 			? listStoredBeadsStateEntries(state)
@@ -1356,31 +1397,14 @@ async function runBeadsPush(opts: BeadsPushOptions, cmd: Command): Promise<void>
 					'Run "ncli beads push --archive-missing --dry-run ..." to inspect candidates, then archive or remove them manually in Notion for now',
 				);
 			}
-			if (toCreate.length > 0) {
-				const createCall = buildBeadsCreateCall(databaseInfo.data_source_id, toCreate);
-				createResult = (await conn.callTool(createCall.tool, createCall.args)) as Record<
-					string,
-					unknown
-				>;
-				const createPayload = extractResultJson(createResult, "beads push create");
-				const createdPages = Array.isArray(createPayload.pages) ? createPayload.pages : [];
-				for (const [index, issue] of toCreate.entries()) {
-					const page = createdPages[index];
-					if (
-						page &&
-						typeof page === "object" &&
-						page !== null &&
-						"id" in page &&
-						typeof page.id === "string"
-					) {
-						state.page_ids[issue.id] = page.id;
-						const plannedComments = toCreateComments.find((entry) => entry.id === issue.id);
-						if (plannedComments) {
-							plannedComments.pageId = page.id;
-						}
-					}
-				}
-			}
+			createResult = await createBeadsPagesForPush(
+				conn,
+				stateStore,
+				state,
+				databaseInfo.data_source_id,
+				toCreate,
+				toCreateComments,
+			);
 			for (const update of toUpdate) {
 				const updateCall = buildBeadsUpdateCall(update.pageId, update.issue);
 				const result = (await conn.callTool(updateCall.tool, updateCall.args)) as Record<

@@ -1,5 +1,9 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { Command } from "commander";
 import { describe, expect, it } from "vitest";
+import { BeadsStateStore } from "../util/beads-state.js";
 import {
 	buildBeadsAuthCall,
 	buildBeadsBodyUpdateCall,
@@ -12,6 +16,7 @@ import {
 	buildBeadsStateDoctorEntry,
 	buildBeadsUpdateCall,
 	collectExistingBeadsPagesForPush,
+	createBeadsPagesForPush,
 	detectBeadsArchiveSupport,
 	registerBeadsCommands,
 	summarizeBeadsStateDoctorEntries,
@@ -423,6 +428,84 @@ describe("collectExistingBeadsPagesForPush", () => {
 				"https://www.notion.so/workspace/beads-db",
 			),
 		).rejects.toThrow("Duplicate live Beads ID rows detected");
+	});
+});
+
+describe("createBeadsPagesForPush", () => {
+	const makePushIssue = (id: string) => ({
+		id,
+		title: `Issue ${id}`,
+		description: null,
+		body: null,
+		status: "open" as const,
+		priority: null,
+		type: null,
+		issue_type: null,
+		assignee: null,
+		labels: [],
+		comments: [],
+	});
+
+	it("persists created mappings before later sync steps run", async () => {
+		const tempDir = await mkdtemp(path.join(os.tmpdir(), "ncli-beads-state-"));
+		try {
+			const stateStore = new BeadsStateStore(tempDir);
+			const state = { database_id: "db-1", page_ids: {} as Record<string, string> };
+			const plannedComments = [{ id: "bd-1", title: "Issue bd-1", pageId: null, comments: [] }];
+			const conn = {
+				callTool: async () =>
+					({
+						pages: [{ id: "11111111-1111-4111-8111-111111111111" }],
+					}) as Record<string, unknown>,
+			};
+
+			await createBeadsPagesForPush(
+				conn,
+				stateStore,
+				state,
+				"ds-1",
+				[makePushIssue("bd-1")],
+				plannedComments,
+			);
+
+			expect(stateStore.readForDatabase("db-1")).toEqual({
+				database_id: "db-1",
+				page_ids: {
+					"bd-1": "11111111-1111-4111-8111-111111111111",
+				},
+			});
+			expect(plannedComments[0]?.pageId).toBe("11111111-1111-4111-8111-111111111111");
+		} finally {
+			await rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps earlier created mappings when the batch returns only a partial set of ids", async () => {
+		const tempDir = await mkdtemp(path.join(os.tmpdir(), "ncli-beads-state-"));
+		try {
+			const stateStore = new BeadsStateStore(tempDir);
+			const state = { database_id: "db-1", page_ids: {} as Record<string, string> };
+			const conn = {
+				callTool: async () =>
+					({
+						pages: [{ id: "11111111-1111-4111-8111-111111111111" }, {}],
+					}) as Record<string, unknown>,
+			};
+
+			await createBeadsPagesForPush(conn, stateStore, state, "ds-1", [
+				makePushIssue("bd-1"),
+				makePushIssue("bd-2"),
+			]);
+
+			expect(stateStore.readForDatabase("db-1")).toEqual({
+				database_id: "db-1",
+				page_ids: {
+					"bd-1": "11111111-1111-4111-8111-111111111111",
+				},
+			});
+		} finally {
+			await rm(tempDir, { recursive: true, force: true });
+		}
 	});
 });
 
