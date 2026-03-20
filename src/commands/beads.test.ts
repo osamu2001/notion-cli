@@ -267,14 +267,14 @@ describe("buildBeadsCreateCall", () => {
 });
 
 describe("buildBeadsSearchCall", () => {
-	it("scopes live row discovery to the target database when a URL is available", () => {
-		expect(buildBeadsSearchCall("bd-1", "https://www.notion.so/workspace/beads-db")).toEqual({
+	it("scopes live row discovery to the target data source when an id is available", () => {
+		expect(buildBeadsSearchCall("bd-1", "ds-1")).toEqual({
 			tool: "notion-search",
 			args: {
 				query: "bd-1",
 				page_size: 25,
 				query_type: "internal",
-				data_source_url: "https://www.notion.so/workspace/beads-db",
+				data_source_url: "collection://ds-1",
 			},
 		});
 	});
@@ -517,7 +517,7 @@ describe("collectExistingBeadsPagesForPush", () => {
 					comments: [],
 				},
 			],
-			"https://www.notion.so/workspace/beads-db",
+			"ds-1",
 		);
 
 		expect(result.existingById.get("bd-1")?.notion_page_id).toBe(
@@ -539,7 +539,7 @@ describe("collectExistingBeadsPagesForPush", () => {
 				query: "bd-1",
 				page_size: 25,
 				query_type: "internal",
-				data_source_url: "https://www.notion.so/workspace/beads-db",
+				data_source_url: "collection://ds-1",
 			},
 		});
 	});

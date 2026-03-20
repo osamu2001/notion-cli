@@ -304,14 +304,14 @@ export function buildBeadsCreateCall(dataSourceId: string, issues: BeadsPushIssu
 	};
 }
 
-export function buildBeadsSearchCall(query: string, databaseUrl: string | null): ToolCall {
+export function buildBeadsSearchCall(query: string, dataSourceId: string | null): ToolCall {
 	return {
 		tool: "notion-search",
 		args: {
 			query,
 			page_size: 25,
 			query_type: "internal",
-			...(databaseUrl ? { data_source_url: databaseUrl } : {}),
+			...(dataSourceId ? { data_source_url: `collection://${dataSourceId}` } : {}),
 		},
 	};
 }
@@ -662,7 +662,7 @@ export async function collectExistingBeadsPagesForPush(
 	conn: ToolCaller,
 	state: StoredBeadsState,
 	inputIssues: BeadsPushIssue[],
-	databaseUrl: string | null,
+	dataSourceId: string | null,
 ): Promise<ExistingBeadsPagesForPush> {
 	const existingById = new Map<string, BeadsIssue>();
 	const rawExistingPages: RawExistingBeadsPage[] = [];
@@ -694,7 +694,7 @@ export async function collectExistingBeadsPagesForPush(
 		if (existingById.has(inputIssue.id)) {
 			continue;
 		}
-		const searchCall = buildBeadsSearchCall(inputIssue.id, databaseUrl);
+		const searchCall = buildBeadsSearchCall(inputIssue.id, dataSourceId);
 		const searchResult = (await conn.callTool(searchCall.tool, searchCall.args)) as Record<
 			string,
 			unknown
@@ -1280,7 +1280,7 @@ async function runBeadsPush(opts: BeadsPushOptions, cmd: Command): Promise<void>
 			conn,
 			state,
 			input.issues,
-			databaseInfo.database_url,
+			databaseInfo.data_source_id,
 		);
 		const existingById = existingPages.existingById;
 		const existingCommentsById = new Map<string, BeadsIssueComment[]>();
