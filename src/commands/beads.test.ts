@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { Command } from "commander";
 import { describe, expect, it } from "vitest";
+import { BeadsConfigStore } from "../util/beads-config.js";
 import { BeadsStateStore } from "../util/beads-state.js";
 import {
 	buildBeadsAuthCall,
@@ -15,10 +16,12 @@ import {
 	buildBeadsSearchCall,
 	buildBeadsStateDoctorEntry,
 	buildBeadsUpdateCall,
+	buildInitialBeadsState,
 	collectExistingBeadsPagesForPush,
 	createBeadsPagesForPush,
 	detectBeadsArchiveSupport,
 	registerBeadsCommands,
+	saveBeadsConfigAndResetState,
 	storedConfigForResolvedTarget,
 	summarizeBeadsStateDoctorEntries,
 } from "./beads.js";
@@ -110,6 +113,38 @@ describe("storedConfigForResolvedTarget", () => {
 				source: "flags",
 			}),
 		).toEqual(config);
+	});
+});
+
+describe("saveBeadsConfigAndResetState", () => {
+	it("writes config and an empty state for the target database", async () => {
+		const tempDir = await mkdtemp(path.join(os.tmpdir(), "ncli-beads-init-"));
+		try {
+			const configStore = new BeadsConfigStore(tempDir);
+			const stateStore = new BeadsStateStore(tempDir);
+			stateStore.save({
+				database_id: "db-old",
+				page_ids: { "bd-old": "page-old" },
+			});
+
+			const savedConfig = {
+				database_id: "db-new",
+				data_source_id: "ds-new",
+				view_url: "view://new",
+				schema_version: "2026-03-18",
+			};
+
+			const initialState = saveBeadsConfigAndResetState(configStore, stateStore, savedConfig);
+
+			expect(initialState).toEqual(buildInitialBeadsState("db-new"));
+			expect(configStore.read()).toEqual(savedConfig);
+			expect(stateStore.read()).toEqual({
+				database_id: "db-new",
+				page_ids: {},
+			});
+		} finally {
+			await rm(tempDir, { recursive: true, force: true });
+		}
 	});
 });
 

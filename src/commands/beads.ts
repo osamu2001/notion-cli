@@ -400,6 +400,24 @@ function validateStoredConfigMatch(
 	}
 }
 
+export function buildInitialBeadsState(databaseId: string): StoredBeadsState {
+	return {
+		database_id: databaseId,
+		page_ids: {},
+	};
+}
+
+export function saveBeadsConfigAndResetState(
+	configStore: Pick<BeadsConfigStore, "save">,
+	stateStore: Pick<BeadsStateStore, "save">,
+	savedConfig: StoredBeadsConfig,
+): StoredBeadsState {
+	configStore.save(savedConfig);
+	const initialState = buildInitialBeadsState(savedConfig.database_id);
+	stateStore.save(initialState);
+	return initialState;
+}
+
 function readRequiredStoredState(command: string): {
 	store: BeadsStateStore;
 	state: StoredBeadsState;
@@ -894,6 +912,7 @@ async function runBeadsInit(opts: BeadsInitOptions, cmd: Command): Promise<void>
 	const parentId = requireOption(opts.parent, "--parent", "A parent page ID", "init");
 	const title = opts.title ?? BEADS_DEFAULT_DATABASE_TITLE;
 	const store = new BeadsConfigStore();
+	const stateStore = new BeadsStateStore();
 
 	await withConnection(async (conn) => {
 		const dbCall = buildBeadsInitDbCall(parentId, title);
@@ -928,7 +947,7 @@ async function runBeadsInit(opts: BeadsInitOptions, cmd: Command): Promise<void>
 			databaseInfo.data_source_id,
 			viewUrl,
 		);
-		store.save(savedConfig);
+		saveBeadsConfigAndResetState(store, stateStore, savedConfig);
 
 		const payload = {
 			database_id: savedConfig.database_id,
@@ -1063,10 +1082,7 @@ async function runBeadsStatus(opts: BeadsStatusOptions, cmd: Command): Promise<v
 		>;
 		const fetchText = extractResultText(fetchResult, "beads fetch");
 		const databaseInfo = extractBeadsDatabaseInfoFromText(fetchText);
-		validateStoredConfigMatch(
-			storedConfigForResolvedTarget(target),
-			databaseInfo.data_source_id,
-		);
+		validateStoredConfigMatch(storedConfigForResolvedTarget(target), databaseInfo.data_source_id);
 
 		const schema = assessBeadsSchema(detectBeadsPropertiesFromFetchText(fetchText), true);
 		const viewUrl = target.viewUrl ?? null;
@@ -1205,10 +1221,7 @@ async function runBeadsPush(opts: BeadsPushOptions, cmd: Command): Promise<void>
 				'Run "ncli fetch <db-id> --raw" and check that the target is a database page',
 			);
 		}
-		validateStoredConfigMatch(
-			storedConfigForResolvedTarget(target),
-			databaseInfo.data_source_id,
-		);
+		validateStoredConfigMatch(storedConfigForResolvedTarget(target), databaseInfo.data_source_id);
 
 		const schema = assessBeadsSchema(detectBeadsPropertiesFromFetchText(fetchText), true);
 		if (schema.missing.length > 0) {
