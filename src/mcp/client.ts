@@ -1,3 +1,4 @@
+import { appendFileSync } from "node:fs";
 import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -8,9 +9,100 @@ import { TokenStore } from "../auth/token-store.js";
 import { CONFIG_DIR, MCP_SERVER_URL } from "../util/config.js";
 import { CliError } from "../util/errors.js";
 
+interface McpDebugEvent {
+	timestamp: string;
+	op: "connect" | "call_tool" | "list_tools";
+	phase: "start" | "success" | "error" | "auth_retry";
+	tool?: string;
+	args_summary?: Record<string, unknown>;
+	duration_ms?: number;
+	error_class?: string;
+	error_message?: string;
+	mcp_is_error?: boolean;
+	mcp_error_summary?: string;
+	server_url?: string;
+}
+
+class McpDebugLogger {
+	private readonly stderrEnabled: boolean;
+	private readonly filePath: string | null;
+
+	constructor(argv: readonly string[] = process.argv, env: NodeJS.ProcessEnv = process.env) {
+		const envEnabled = /^1|true|yes$/i.test((env.NCLI_DEBUG_MCP ?? "").trim());
+		this.stderrEnabled = envEnabled || argv.includes("--verbose");
+		this.filePath = (env.NCLI_DEBUG_MCP_FILE ?? "").trim() || null;
+	}
+
+	log(event: Omit<McpDebugEvent, "timestamp">): void {
+		if (!this.stderrEnabled && !this.filePath) {
+			return;
+		}
+		const line = JSON.stringify({ timestamp: new Date().toISOString(), ...event });
+		if (this.stderrEnabled) {
+			process.stderr.write(`[ncli:mcp] ${line}\n`);
+		}
+		if (this.filePath) {
+			try {
+				appendFileSync(this.filePath, `${line}\n`, "utf8");
+			} catch (error) {
+				if (this.stderrEnabled) {
+					process.stderr.write(
+						`[ncli:mcp] ${JSON.stringify({
+							timestamp: new Date().toISOString(),
+							op: event.op,
+							phase: "error",
+							error_class: error instanceof Error ? error.name : typeof error,
+							error_message:
+								error instanceof Error
+									? `failed to append debug log to ${this.filePath}: ${error.message}`
+									: `failed to append debug log to ${this.filePath}: ${String(error)}`,
+						})}\n`,
+					);
+				}
+			}
+		}
+	}
+}
+
+function summarizeMcpDebugValue(value: unknown, depth = 0): unknown {
+	if (value == null || typeof value === "number" || typeof value === "boolean") {
+		return value;
+	}
+	if (typeof value === "string") {
+		return value.length <= 120 ? value : `${value.slice(0, 117)}...`;
+	}
+	if (Array.isArray(value)) {
+		if (depth >= 2) {
+			return `[array:${value.length}]`;
+		}
+		return value.slice(0, 5).map((item) => summarizeMcpDebugValue(item, depth + 1));
+	}
+	if (typeof value === "object") {
+		if (depth >= 2) {
+			return "[object]";
+		}
+		return Object.fromEntries(
+			Object.entries(value as Record<string, unknown>)
+				.sort(([left], [right]) => left.localeCompare(right))
+				.slice(0, 10)
+				.map(([key, entryValue]) => [key, summarizeMcpDebugValue(entryValue, depth + 1)]),
+		);
+	}
+	return String(value);
+}
+
+function summarizeMcpDebugArgs(args: Record<string, unknown>): Record<string, unknown> {
+	return Object.fromEntries(
+		Object.entries(args)
+			.sort(([left], [right]) => left.localeCompare(right))
+			.map(([key, value]) => [key, summarizeMcpDebugValue(value)]),
+	);
+}
+
 export class MCPConnection {
 	private client: Client | null = null;
 	private callbackServer: CallbackServer | null = null;
+	private readonly debug = new McpDebugLogger();
 
 	async connect(): Promise<void> {
 		const tokenStore = new TokenStore(CONFIG_DIR);
@@ -29,12 +121,32 @@ export class MCPConnection {
 		let transport = new StreamableHTTPClientTransport(serverUrl, {
 			authProvider: provider,
 		});
+		const startedAt = Date.now();
+		this.debug.log({
+			op: "connect",
+			phase: "start",
+			server_url: serverUrl.toString(),
+		});
 
 		try {
 			await client.connect(transport);
+			this.debug.log({
+				op: "connect",
+				phase: "success",
+				server_url: serverUrl.toString(),
+				duration_ms: Date.now() - startedAt,
+			});
 		} catch (error) {
 			if (error instanceof UnauthorizedError) {
 				console.error("Opening browser for Notion login...");
+				this.debug.log({
+					op: "connect",
+					phase: "auth_retry",
+					server_url: serverUrl.toString(),
+					duration_ms: Date.now() - startedAt,
+					error_class: error.name,
+					error_message: error.message,
+				});
 
 				const code = await callbackPromise;
 				await transport.finishAuth(code);
@@ -44,8 +156,22 @@ export class MCPConnection {
 					authProvider: provider,
 				});
 				await client.connect(transport);
+				this.debug.log({
+					op: "connect",
+					phase: "success",
+					server_url: serverUrl.toString(),
+					duration_ms: Date.now() - startedAt,
+				});
 			} else {
 				callbackServer.stop();
+				this.debug.log({
+					op: "connect",
+					phase: "error",
+					server_url: serverUrl.toString(),
+					duration_ms: Date.now() - startedAt,
+					error_class: error instanceof Error ? error.name : typeof error,
+					error_message: error instanceof Error ? error.message : String(error),
+				});
 				throw error;
 			}
 		}
@@ -62,11 +188,54 @@ export class MCPConnection {
 				"Run any command — connection is automatic",
 			);
 		}
-		const result = await this.client.callTool({ name, arguments: args });
-		if (result.isError) {
-			throw mcpErrorToCliError(name, result);
+		const startedAt = Date.now();
+		const argsSummary = summarizeMcpDebugArgs(args);
+		this.debug.log({
+			op: "call_tool",
+			phase: "start",
+			tool: name,
+			args_summary: argsSummary,
+		});
+		let errorLogged = false;
+		try {
+			const result = await this.client.callTool({ name, arguments: args });
+			if (result.isError) {
+				errorLogged = true;
+				this.debug.log({
+					op: "call_tool",
+					phase: "error",
+					tool: name,
+					args_summary: argsSummary,
+					duration_ms: Date.now() - startedAt,
+					error_class: "mcp_result_error",
+					mcp_is_error: true,
+					mcp_error_summary: extractMcpErrorMessage(result),
+				});
+				throw mcpErrorToCliError(name, result);
+			}
+			this.debug.log({
+				op: "call_tool",
+				phase: "success",
+				tool: name,
+				args_summary: argsSummary,
+				duration_ms: Date.now() - startedAt,
+				mcp_is_error: false,
+			});
+			return result;
+		} catch (error) {
+			if (!errorLogged) {
+				this.debug.log({
+					op: "call_tool",
+					phase: "error",
+					tool: name,
+					args_summary: argsSummary,
+					duration_ms: Date.now() - startedAt,
+					error_class: error instanceof Error ? error.name : typeof error,
+					error_message: error instanceof Error ? error.message : String(error),
+				});
+			}
+			throw error;
 		}
-		return result;
 	}
 
 	async listTools(): Promise<Tool[]> {
@@ -77,8 +246,26 @@ export class MCPConnection {
 				"Run any command — connection is automatic",
 			);
 		}
-		const result = await this.client.listTools();
-		return result.tools;
+		const startedAt = Date.now();
+		this.debug.log({ op: "list_tools", phase: "start" });
+		try {
+			const result = await this.client.listTools();
+			this.debug.log({
+				op: "list_tools",
+				phase: "success",
+				duration_ms: Date.now() - startedAt,
+			});
+			return result.tools;
+		} catch (error) {
+			this.debug.log({
+				op: "list_tools",
+				phase: "error",
+				duration_ms: Date.now() - startedAt,
+				error_class: error instanceof Error ? error.name : typeof error,
+				error_message: error instanceof Error ? error.message : String(error),
+			});
+			throw error;
+		}
 	}
 
 	async disconnect(): Promise<void> {
