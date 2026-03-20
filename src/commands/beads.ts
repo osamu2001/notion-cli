@@ -158,7 +158,7 @@ function stateHint(command: string): string {
 
 function resolveStatusTarget(opts: BeadsStatusOptions): ResolvedBeadsTarget {
 	const store = new BeadsConfigStore();
-	const config = store.read();
+	const config = store.readStrict();
 	const databaseId = opts.databaseId ?? config?.database_id;
 	if (!databaseId) {
 		throw new CliError(
@@ -180,7 +180,7 @@ function resolveStatusTarget(opts: BeadsStatusOptions): ResolvedBeadsTarget {
 
 function resolvePullTarget(opts: BeadsPullOptions): ResolvedBeadsTarget {
 	const store = new BeadsConfigStore();
-	const config = store.read();
+	const config = store.readStrict();
 	const databaseId = config?.database_id;
 	if (!databaseId) {
 		throw new CliError(
@@ -199,7 +199,7 @@ function resolvePullTarget(opts: BeadsPullOptions): ResolvedBeadsTarget {
 
 function resolvePushTarget(opts: BeadsPushOptions): ResolvedBeadsTarget {
 	const store = new BeadsConfigStore();
-	const config = store.read();
+	const config = store.readStrict();
 	if (opts.databaseId || opts.viewUrl) {
 		if (!opts.databaseId || !opts.viewUrl) {
 			throw new CliError(
@@ -440,7 +440,7 @@ function readRequiredStoredState(command: string): {
 	state: StoredBeadsState;
 } {
 	const store = new BeadsStateStore();
-	const state = store.read();
+	const state = store.readStrict();
 	if (!state) {
 		throw new CliError(
 			"Missing beads state",
@@ -836,7 +836,7 @@ async function collectBeadsStateDoctorData(
 
 function runBeadsStateShow(cmd: Command): void {
 	const store = new BeadsStateStore();
-	const state = store.read();
+	const state = store.readStrict();
 	printOutput(
 		{
 			configured: !!state,
@@ -873,7 +873,7 @@ async function runBeadsStateImport(opts: BeadsStateImportOptions, cmd: Command):
 		parseStateJson(raw, "beads state import"),
 		"beads state import",
 	);
-	const config = new BeadsConfigStore().read();
+	const config = new BeadsConfigStore().readStrict();
 	if (config && config.database_id !== state.database_id) {
 		throw new CliError(
 			"Invalid beads state import",
@@ -895,7 +895,7 @@ async function runBeadsStateImport(opts: BeadsStateImportOptions, cmd: Command):
 
 async function runBeadsStateDoctor(cmd: Command): Promise<void> {
 	const { store, state } = readRequiredStoredState("doctor");
-	const config = new BeadsConfigStore().read();
+	const config = new BeadsConfigStore().readStrict();
 
 	await withConnection(async (conn) => {
 		const { entries, rawEntries } = await collectBeadsStateDoctorData(conn, state);
@@ -1026,7 +1026,7 @@ async function runBeadsConfigSet(opts: BeadsConfigSetOptions, cmd: Command): Pro
 			databaseInfo.data_source_id,
 			viewUrl,
 		);
-		const previous = store.read();
+		const previous = store.readStrict();
 		store.save(savedConfig);
 		if (!previous || previous.database_id !== savedConfig.database_id) {
 			stateStore.save({ database_id: savedConfig.database_id, page_ids: {} });
@@ -1051,7 +1051,7 @@ async function runBeadsConfigSet(opts: BeadsConfigSetOptions, cmd: Command): Pro
 
 function runBeadsConfigShow(cmd: Command): void {
 	const store = new BeadsConfigStore();
-	const config = store.read();
+	const config = store.readStrict();
 	printOutput(
 		{
 			configured: !!config,
@@ -1104,7 +1104,7 @@ async function runBeadsStatus(opts: BeadsStatusOptions, cmd: Command): Promise<v
 		const schema = assessBeadsSchema(detectBeadsPropertiesFromFetchText(fetchText), true);
 		const viewUrl = target.viewUrl ?? null;
 		const viewConfigured = !viewUrl || databaseInfo.views.some((view) => view.url === viewUrl);
-		const state = stateStore.readForDatabase(target.databaseId);
+		const state = stateStore.readForDatabaseStrict(target.databaseId);
 		const { entries: doctorEntries, rawEntries: rawDoctorEntries } = state
 			? await collectBeadsStateDoctorData(conn, state)
 			: { entries: [], rawEntries: [] };
@@ -1160,7 +1160,7 @@ async function runBeadsPull(opts: BeadsPullOptions, cmd: Command): Promise<void>
 	await withConnection(async (conn) => {
 		const tools = await conn.listTools();
 		const archiveSupport = detectBeadsArchiveSupport(tools);
-		const savedState = stateStore.readForDatabase(target.databaseId);
+		const savedState = stateStore.readForDatabaseStrict(target.databaseId);
 		const state = savedState ?? {
 			database_id: target.databaseId,
 			page_ids: {},
@@ -1267,7 +1267,7 @@ async function runBeadsPush(opts: BeadsPushOptions, cmd: Command): Promise<void>
 			);
 		}
 
-		const state = stateStore.readForDatabase(target.databaseId) ?? {
+		const state = stateStore.readForDatabaseStrict(target.databaseId) ?? {
 			database_id: target.databaseId,
 			page_ids: {},
 		};

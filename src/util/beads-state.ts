@@ -124,6 +124,29 @@ export class BeadsStateStore {
 		}
 	}
 
+	readStrict(): StoredBeadsState | undefined {
+		let raw: string;
+		try {
+			raw = fs.readFileSync(this.filePath(), "utf-8");
+		} catch (error) {
+			if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+				return undefined;
+			}
+			throw error;
+		}
+		let data: unknown;
+		try {
+			data = JSON.parse(raw) as unknown;
+		} catch {
+			throw new CliError(
+				"Invalid beads state",
+				`${this.filePath()} could not be parsed as JSON`,
+				'Fix the JSON or replace it with "ncli beads state import --input <path|->"',
+			);
+		}
+		return normalizeStoredBeadsState(data, this.filePath());
+	}
+
 	save(state: StoredBeadsState): void {
 		this.ensureDir();
 		const normalized = normalizeStoredBeadsState(state);
@@ -140,6 +163,14 @@ export class BeadsStateStore {
 
 	readForDatabase(databaseId: string): StoredBeadsState | undefined {
 		const state = this.read();
+		if (!state || state.database_id !== databaseId) {
+			return undefined;
+		}
+		return state;
+	}
+
+	readForDatabaseStrict(databaseId: string): StoredBeadsState | undefined {
+		const state = this.readStrict();
 		if (!state || state.database_id !== databaseId) {
 			return undefined;
 		}

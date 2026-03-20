@@ -138,4 +138,38 @@ describe("BeadsStateStore", () => {
 		const stat = fs.statSync(path.join(tmpDir, "beads-state.json"));
 		expect(stat.mode & 0o777).toBe(0o600);
 	});
+
+	it("readStrict returns undefined when no state exists", () => {
+		expect(store.readStrict()).toBeUndefined();
+	});
+
+	it("readStrict rejects malformed JSON", () => {
+		fs.writeFileSync(path.join(tmpDir, "beads-state.json"), "{broken", "utf8");
+		expect(() => store.readStrict()).toThrow(CliError);
+		expect(() => store.readStrict()).toThrow(/Invalid beads state/);
+	});
+
+	it("readStrict rejects invalid state shape", () => {
+		fs.writeFileSync(
+			path.join(tmpDir, "beads-state.json"),
+			JSON.stringify({ database_id: "db-1" }),
+			"utf8",
+		);
+		try {
+			store.readStrict();
+			throw new Error("expected readStrict to throw");
+		} catch (error) {
+			expect(error).toBeInstanceOf(CliError);
+			expect((error as CliError).why).toMatch(/must include a "page_ids" object/);
+		}
+	});
+
+	it("readForDatabaseStrict preserves missing-vs-mismatch behavior", () => {
+		store.save({
+			database_id: "db-1",
+			page_ids: { "bd-1": "page-1" },
+		});
+		expect(store.readForDatabaseStrict("db-1")?.database_id).toBe("db-1");
+		expect(store.readForDatabaseStrict("db-2")).toBeUndefined();
+	});
 });
